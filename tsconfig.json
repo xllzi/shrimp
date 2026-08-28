@@ -4,7 +4,8 @@
     "target": "es2023",    // JS version you compile to; modern Node handles this
     "module": "nodenext",  // ESM + Node's import rules
     "outDir": "dist",      // where compiled .js goes
-    "declaration": true    // emits .d.ts — matters if you build a library/framework
+    "declaration": true,    // emits .d.ts — matters if you build a library/framework
+    "types": ["node"]
   },
   "include": ["src"]
 }

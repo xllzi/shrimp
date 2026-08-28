@@ -1,12 +1,14 @@
 import OpenAI from "openai"
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { Responses } from "openai/resources/responses";
+
 
 // init a client
 const client = new OpenAI();
 
 // define a tool set
-const TOOLS = [{
+const TOOLS: Responses.Tool[] = [{
     "type": "function",
     "name": "bash",
     "description": "run bash commands",
@@ -19,7 +21,7 @@ const TOOLS = [{
     "strict": true,
 }];
 
-async function runBash(commands) {
+async function runBash(commands: string) {
     // detect dangerous commands
     let dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"];
     for (let d of dangerous) {
@@ -31,7 +33,7 @@ async function runBash(commands) {
     const run = promisify(execFile);
     const output = await run(
         "bash", ["-c", commands],
-        {timout: 30_000, maxBuffer: 10*1024*1024},
+        {timeout: 30_000, maxBuffer: 10*1024*1024},
     );
     return output;
 }
@@ -39,37 +41,37 @@ async function runBash(commands) {
 /**
  * A ReAct Agent Loop
  */
-async function agentLoop(message) {
+async function agentLoop(message: Responses.ResponseInput) {
     while (true) {
         // call LLM
-        const response = await client.responses.create({
-            model: "qwen3.8-flash",
+        const response: Responses.Response = await client.responses.create({
+            model: "qwen3.8-27b",
             instructions: "You are a helpful assistant.",
             input: message,
-            enable_thinking: true,
             tools: TOOLS,
         })
-        message.push(...response.output);
+        message.push(...response.output as Responses.ResponseInputItem[]);
 
         let toolCalls = response.output.filter((item) => (item.type === "function_call"));
         if (toolCalls.length > 0) {
             // run each tool calls
             for (let call of toolCalls) {
-                var output;
+                var output: string;
                 try {
                     output = JSON.stringify(await runBash(JSON.parse(call.arguments).commands));
                 } catch (error) {
-                    output = error;
+                    output = String(error);
                 }
-                let callOutput = {
+                let callOutput: Responses.ResponseInputItem.FunctionCallOutput = {
                     "type": "function_call_output",
                     "call_id": call.call_id,
                     "output": output,
                 }
-                message.push(callOutput);
+                // push function call output back to message list
+                message.push(callOutput as Responses.ResponseInputItem);
             }
         } else {
-            return response.output_text;
+            return response;
         }
         console.log(message);
     }
@@ -77,7 +79,7 @@ async function agentLoop(message) {
 
 
 let query = "run a bash command only once";
-let history: ResponseInput = [{role: "user", content: query}];
+let history: Responses.ResponseInput = [{role: "user", content: query}];
 const response = await agentLoop(history);
-console.log(response);
-history.push(response.output);
+console.log(response.output_text);
+history.push(...response.output as Responses.ResponseInputItem[]);
