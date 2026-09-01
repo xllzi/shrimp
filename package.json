@@ -11,10 +11,15 @@
   "keywords": [],
   "type": "module",
   "devDependencies": {
+    "@types/emscripten": "^1.41.5",
     "@types/node": "^26.4.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "openai": "^7.7.0"
+    "openai": "^7.7.0",
+    "tree-sitter-bash": "^0.25.1",
+    "web-tree-sitter": "^0.26.13",
+    "zod": "^4.5.4"
   }
 }

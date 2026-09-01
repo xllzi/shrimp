@@ -5,7 +5,8 @@
     "module": "nodenext",  // ESM + Node's import rules
     "outDir": "dist",      // where compiled .js goes
     "declaration": true,    // emits .d.ts — matters if you build a library/framework
-    "types": ["node"]
+    "types": ["node", "emscripten"],
+    "allowImportingTsExtensions": true
   },
   "include": ["src"]
 }
