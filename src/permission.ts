@@ -30,6 +30,24 @@ const COMMAND_WRAPPERS = new Set(["env", "nohup", "nice", "stdbuf", "xargs", "co
 const SAFE_DEVICES = new Set(["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"]);
 const SYSTEM_ROOTS = new Set(["/", "/*", "~", "~/*", "$HOME", "$HOME/*", "${HOME}", "${HOME}/*"]);
 
+export async function permissionCheck(call: Responses.ResponseFunctionToolCall): Promise<Verdict> {
+    let permission: Permission = "allow"
+    let message = "";
+    for (let rule of PERMISSION_RULES) {
+        if (!rule.tools.includes(call.name)) continue;
+        const verdict = rule.check(call);
+        if (verdict && RANK[verdict.permission] > RANK[permission]) {
+            permission = verdict.permission;
+            message = verdict.message;
+        }
+    }
+    if (permission === "ask") {
+        permission = await askPermission(call);
+        message += "\nuser " + permission;
+    }
+    return {permission, message};
+}
+
 function unquote(text: string): string {
     if (text.length >= 2 && (text[0] === '"' || text[0] === "'") && text.at(-1) === text[0]) {
         return text.slice(1, -1);

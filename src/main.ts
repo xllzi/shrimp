@@ -3,6 +3,7 @@ import type { Responses } from "openai/resources/responses";
 import readline from "node:readline/promises";
 import { Permission, RANK, PERMISSION_RULES, askPermission, bashVerdict } from "./permission.ts";
 import { TOOLS, TOOL_HANDLERS } from "./tools.ts";
+import { triggerHook } from "./hooks.ts";
 
 // init a client
 const client = new OpenAI();
@@ -31,20 +32,8 @@ async function agentLoop(message: Responses.ResponseInput) {
             for (let call of toolCalls) {
                 let output = ""; // tool output passed back to LLM
                 // tool call go through permission gate
-                let permission: Permission = "allow";
-                for (let rule of PERMISSION_RULES) {
-                    if (!rule.tools.includes(call.name)) continue;
-                    const verdict = rule.check(call);
-                    if (verdict && RANK[verdict.permission] > RANK[permission]) {
-                        permission = verdict.permission;
-                        output = permission + ": " + verdict.message + "\n";
-                    }
-                }
-                if (permission === "ask") {
-                    permission = await askPermission(call);
-                    output += "user " + permission;
-                }
-                if (permission === "allow") {
+                let verdict = await triggerHook("PreToolUse", call);
+                if (verdict.permission === "allow") {
                     // dispatch function and executed
                     let fn = TOOL_HANDLERS[call.name];
                     let args = JSON.parse(call.arguments);
@@ -53,8 +42,11 @@ async function agentLoop(message: Responses.ResponseInput) {
                     } catch (error) {
                         output = String(error);
                     }
+                } else {
+                    output = verdict.permission + ": " + verdict.message;
                 }
                 // construct function call output
+                // outpu = await triggerHook("PostToolUse", output);
                 let callOutput: Responses.ResponseInputItem.FunctionCallOutput = {
                     "type": "function_call_output",
                     "call_id": call.call_id,
@@ -66,6 +58,7 @@ async function agentLoop(message: Responses.ResponseInput) {
                 console.log(callOutput.output);
             }
         } else {
+            // triggerHook("Stop");
             return response;
         }
     }
@@ -84,6 +77,7 @@ async function main() {
     while (1) {
         query = await rl.question("> ");
         if (query === ":q") break;
+        // query = await triggerHook("UserPromptSubmit", query);
         history.push({role: "user", content: query});
         const response = await agentLoop(history);
         console.log("-----LLM reply-----");

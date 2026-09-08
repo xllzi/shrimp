@@ -4,4 +4,4 @@ node_modules/*
 AGENTS.md
 CLAUDE.md
 .claude/*
-.serena/*
+.artifacts/*
