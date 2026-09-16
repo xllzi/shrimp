@@ -3,7 +3,8 @@ import type { Responses } from "openai/resources/responses";
 import readline from "node:readline/promises";
 import { Permission, RANK, PERMISSION_RULES, askPermission, bashVerdict } from "./permission.ts";
 import { TOOLS, TOOL_HANDLERS } from "./tools.ts";
-import { triggerHook } from "./hooks.ts";
+import { applyUserPromptSubmit, applyPreToolUse, applyPostToolUse, applyStop } from "./hooks.ts";
+import { permissionCheck } from "./permission.ts";
 
 // init a client
 const client = new OpenAI();
@@ -31,22 +32,16 @@ async function agentLoop(message: Responses.ResponseInput) {
             // run each tool calls
             for (let call of toolCalls) {
                 let output = ""; // tool output passed back to LLM
-                // tool call go through permission gate
-                let verdict = await triggerHook("PreToolUse", call);
-                if (verdict.permission === "allow") {
-                    // dispatch function and executed
-                    let fn = TOOL_HANDLERS[call.name];
-                    let args = JSON.parse(call.arguments);
-                    try {
-                        output = await fn(args);
-                    } catch (error) {
-                        output = String(error);
-                    }
+                // hooks may rewrite the call; permission then checks what will actually run
+                call = await applyPreToolUse(call);
+                let finding = await permissionCheck(call);
+                if (finding.permission === "allow") {
+                    output = await runTool(call);
                 } else {
-                    output = verdict.permission + ": " + verdict.message;
+                    output = finding.permission + ": " + finding.message;
                 }
                 // construct function call output
-                // outpu = await triggerHook("PostToolUse", output);
+                output = await applyPostToolUse(call, output);
                 let callOutput: Responses.ResponseInputItem.FunctionCallOutput = {
                     "type": "function_call_output",
                     "call_id": call.call_id,
@@ -58,12 +53,24 @@ async function agentLoop(message: Responses.ResponseInput) {
                 console.log(callOutput.output);
             }
         } else {
-            // triggerHook("Stop");
+            await applyStop(response);
             return response;
         }
     }
 }
 
+async function runTool(call: Responses.ResponseFunctionToolCall): Promise<string> {
+    let output: string;
+    // dispatch function and executed
+    let fn = TOOL_HANDLERS[call.name];
+    let args = JSON.parse(call.arguments);
+    try {
+        output = await fn(args);
+    } catch (error) {
+        output = String(error);
+    }
+    return output;
+}
 /**
  * main entry point
  */
@@ -77,7 +84,7 @@ async function main() {
     while (1) {
         query = await rl.question("> ");
         if (query === ":q") break;
-        // query = await triggerHook("UserPromptSubmit", query);
+        query = await applyUserPromptSubmit({ query, history });
         history.push({role: "user", content: query});
         const response = await agentLoop(history);
         console.log("-----LLM reply-----");

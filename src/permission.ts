@@ -12,7 +12,7 @@ import readline from "node:readline/promises";
 export type Permission = "allow" | "ask" | "deny";
 
 export const RANK: Record<Permission, number> = { allow: 0, ask: 1, deny: 2 };
-type Finding = { permission: Permission, message: string };
+export type Finding = { permission: Permission, message: string };
 type Verdict = Finding | null;
 
 // parse bash into a syntax tree; both wasm files ship inside the packages
@@ -22,6 +22,7 @@ const bash = await Language.load(require.resolve("tree-sitter-bash/tree-sitter-b
 const bashParser = new Parser();
 bashParser.setLanguage(bash);
 
+/** class of string in bash command */
 const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ash", "ksh"]);
 const POWER_OFF = new Set(["shutdown", "reboot", "halt", "poweroff"]);
 const DISK_DESTROYERS = new Set(["fdisk", "sfdisk", "cfdisk", "parted", "wipefs", "blockdev"]);
@@ -30,7 +31,12 @@ const COMMAND_WRAPPERS = new Set(["env", "nohup", "nice", "stdbuf", "xargs", "co
 const SAFE_DEVICES = new Set(["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"]);
 const SYSTEM_ROOTS = new Set(["/", "/*", "~", "~/*", "$HOME", "$HOME/*", "${HOME}", "${HOME}/*"]);
 
-export async function permissionCheck(call: Responses.ResponseFunctionToolCall): Promise<Verdict> {
+/**
+ * permisstionCheck check a function tool call for permission: allow, ask, deny
+ * ask permission will trigger askPermission directly
+ * eventually output only two kind of permission: allow or deny and message
+ */
+export async function permissionCheck(call: Responses.ResponseFunctionToolCall): Promise<Finding> {
     let permission: Permission = "allow"
     let message = "";
     for (let rule of PERMISSION_RULES) {
@@ -46,6 +52,24 @@ export async function permissionCheck(call: Responses.ResponseFunctionToolCall):
         message += "\nuser " + permission;
     }
     return {permission, message};
+}
+
+export async function askPermission(toolCall: Responses.ResponseFunctionToolCall): Promise<Permission> {
+    console.log("tool call: ", toolCall.name);
+    console.log(toolCall.arguments);
+    let permission!: Permission;
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+    })
+    while (permission === undefined) {
+        const answer = await rl.question("Approve this tool call? [y/n]");
+        if (answer === 'y') permission = "allow";
+        else if (answer === 'n') permission = "deny";
+        else console.log("input y or n");
+    }
+    rl.close();
+    return permission;
 }
 
 function unquote(text: string): string {
@@ -195,20 +219,3 @@ function outOfWorkspace(toolCall: Responses.ResponseFunctionToolCall): Verdict {
     return { permission: "ask", message: "writes outside the workspace" };
 }
 
-export async function askPermission(toolCall: Responses.ResponseFunctionToolCall): Promise<Permission> {
-    console.log("tool call: ", toolCall.name);
-    console.log(toolCall.arguments);
-    let permission!: Permission;
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-    })
-    while (permission === undefined) {
-        const answer = await rl.question("Approve this tool call? [y/n]");
-        if (answer === 'y') permission = "allow";
-        else if (answer === 'n') permission = "deny";
-        else console.log("input y or n");
-    }
-    rl.close();
-    return permission;
-}
