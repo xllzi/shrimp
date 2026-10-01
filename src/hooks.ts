@@ -1,11 +1,9 @@
-import type { Responses } from "openai/resources/responses";
-
-type ToolCall = Responses.ResponseFunctionToolCall;
+import type { AssistantMessage, Message, ToolCall } from "./llm.ts";
 
 /** Loop state a prompt handler can see. */
 export type UserPromptCtx = {
     query: string;
-    history: Responses.ResponseInput;
+    history: Message[];
 };
 
 // --- registries: one per point, each with its own contract ------------
@@ -13,7 +11,7 @@ export type UserPromptCtx = {
 const userPromptHooks: Array<(ctx: UserPromptCtx) => string | Promise<string>> = [];
 const preToolHooks: Array<(call: ToolCall) => ToolCall | Promise<ToolCall>> = [];
 const postToolHooks: Array<(call: ToolCall, output: string) => string | Promise<string>> = [];
-const stopHooks: Array<(response: Responses.Response) => void | Promise<void>> = [];
+const stopHooks: Array<(response: AssistantMessage) => void | Promise<void>> = [];
 
 export function onUserPromptSubmit(fn: (ctx: UserPromptCtx) => string | Promise<string>) {
     userPromptHooks.push(fn);
@@ -27,7 +25,7 @@ export function onPostToolUse(fn: (call: ToolCall, output: string) => string | P
     postToolHooks.push(fn);
 }
 
-export function onStop(fn: (response: Responses.Response) => void | Promise<void>) {
+export function onStop(fn: (response: AssistantMessage) => void | Promise<void>) {
     stopHooks.push(fn);
 }
 
@@ -69,7 +67,7 @@ export async function applyPostToolUse(call: ToolCall, output: string): Promise<
     return output;
 }
 
-export async function applyStop(response: Responses.Response): Promise<void> {
+export async function applyStop(response: AssistantMessage): Promise<void> {
     for (const hook of stopHooks) {
         try {
             await hook(response);

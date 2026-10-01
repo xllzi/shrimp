@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --experimental-strip-types --test src/llm.test.ts src/permission.test.ts",
     "dev": "node --env-file=.env src/main.ts",
     "check": "tsc --noEmit"
   },
@@ -17,6 +17,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.131.0",
     "openai": "^7.7.0",
     "tree-sitter-bash": "^0.25.1",
     "web-tree-sitter": "^0.26.13",

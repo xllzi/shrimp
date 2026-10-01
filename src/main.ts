@@ -1,56 +1,49 @@
-import OpenAI from "openai"
-import type { Responses } from "openai/resources/responses";
 import readline from "node:readline/promises";
-import { Permission, RANK, PERMISSION_RULES, askPermission, bashVerdict } from "./permission.ts";
-import { TOOLS, TOOL_HANDLERS } from "./tools.ts";
+import { permissionCheck, type Finding } from "./permission.ts";
+import { TOOL_DEFINITIONS, TOOL_HANDLERS } from "./tools.ts";
 import { applyUserPromptSubmit, applyPreToolUse, applyPostToolUse, applyStop } from "./hooks.ts";
-import { permissionCheck } from "./permission.ts";
+import { llmStream, type Message, type ModelConfig, type ToolCall } from "./llm.ts";
 
-// init a client
-const client = new OpenAI();
+const MODEL: ModelConfig = {
+    api: "openai-responses",
+    model: "qwen3.8-27b",
+};
 
 /**
  * A ReAct Agent Loop
  */
-async function agentLoop(message: Responses.ResponseInput) {
-    console.log("-----context-----");
-    console.log(message);
+async function agentLoop(messages: Message[]) {
     while (true) {
-        // call LLM
-        const response: Responses.Response = await client.responses.create({
-            model: "qwen3.8-27b",
-            instructions: "You are a thinking machine.",
-            input: message,
-            tools: TOOLS,
-        })
-        message.push(...response.output as Responses.ResponseInputItem[]);
-        console.log("-----LLM response-----");
-        console.log(response.output);
-
-        let toolCalls = response.output.filter((item) => (item.type === "function_call"));
+        const response = await llmStream({
+            model: MODEL,
+            systemPrompt: "You are a thinking machine.",
+            messages,
+            tools: TOOL_DEFINITIONS,
+        });
+        messages.push(response);
+        const toolCalls = response.content.filter((item): item is ToolCall => item.type === "toolCall");
         if (toolCalls.length > 0) {
             // run each tool calls
             for (let call of toolCalls) {
                 let output = ""; // tool output passed back to LLM
                 // hooks may rewrite the call; permission then checks what will actually run
                 call = await applyPreToolUse(call);
-                let finding = await permissionCheck(call);
-                if (finding.permission === "allow") {
+                let finding: Finding = await permissionCheck(call);
+                if (finding.permission === "allow") { // REFACTOR: abstraction barrier break
                     output = await runTool(call);
                 } else {
                     output = finding.permission + ": " + finding.message;
                 }
                 // construct function call output
                 output = await applyPostToolUse(call, output);
-                let callOutput: Responses.ResponseInputItem.FunctionCallOutput = {
-                    "type": "function_call_output",
-                    "call_id": call.call_id,
-                    "output": output,
-                }
-                // push function call output back to message list
-                message.push(callOutput as Responses.ResponseInputItem);
+                messages.push({
+                    role: "tool",
+                    toolCallId: call.id,
+                    toolName: call.name,
+                    content: [{ type: "text", text: output }],
+                });
                 console.log("-----function call output-----");
-                console.log(callOutput.output);
+                console.log(output);
             }
         } else {
             await applyStop(response);
@@ -59,13 +52,12 @@ async function agentLoop(message: Responses.ResponseInput) {
     }
 }
 
-async function runTool(call: Responses.ResponseFunctionToolCall): Promise<string> {
+async function runTool(call: ToolCall): Promise<string> {
     let output: string;
     // dispatch function and executed
     let fn = TOOL_HANDLERS[call.name];
-    let args = JSON.parse(call.arguments);
     try {
-        output = await fn(args);
+        output = await fn(call.arguments);
     } catch (error) {
         output = String(error);
     }
@@ -76,7 +68,7 @@ async function runTool(call: Responses.ResponseFunctionToolCall): Promise<string
  */
 async function main() {
     let query = "";
-    let history: Responses.ResponseInput = [];
+    const history: Message[] = [];
     const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
@@ -85,18 +77,15 @@ async function main() {
         query = await rl.question("> ");
         if (query === ":q") break;
         query = await applyUserPromptSubmit({ query, history });
-        history.push({role: "user", content: query});
+        history.push({ role: "user", content: [{ type: "text", text: query }] });
         const response = await agentLoop(history);
         console.log("-----LLM reply-----");
-        console.log(response.output_text);
+        console.log(response.content
+            .filter((block) => block.type === "text" || block.type === "refusal")
+            .map((block) => block.type === "text" ? block.text : block.refusal)
+            .join("\n"));
     }
     rl.close();
 }
 
-// `--check '<commands>'` tests the permission gate without talking to the LLM
-if (process.argv[2] === "--check") {
-    const verdict = bashVerdict(process.argv[3] ?? "");
-    console.log(verdict === null ? "allow" : `${verdict.permission}: ${verdict.message}`);
-} else {
-    main();
-}
+main();

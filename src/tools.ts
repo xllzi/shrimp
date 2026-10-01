@@ -1,9 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, writeFile } from "node:fs/promises";
-import type { Responses } from "openai/resources/responses";
 import { z } from "zod";
-import { zodResponsesFunction } from "openai/helpers/zod"
 
 const BashSchema = z.object({
     commands: z.string(),
@@ -24,28 +22,35 @@ const EditFileSchema = z.object({
     newText: z.string(),
 })
 
-// define a tool set
-export const TOOLS: Responses.Tool[] = [
-    zodResponsesFunction({
-    name: "bash",
-    description: "run bash commands",
-    parameters: BashSchema
-    }),
-    zodResponsesFunction({
-        name: "read_file",
-        description: "read a file content",
-        parameters: ReadFileSchema
-    }),
-    zodResponsesFunction({
-        name: "write_file",
-        description: "write content to a file",
-        parameters: WriteFileSchema
-    }),
-    zodResponsesFunction({
-        name: "edit_file",
-        description: "replace text in file",
-        parameters: EditFileSchema
-    }),
+const ToolArgumentsSchema = z.record(z.string(), z.unknown());
+
+export interface ToolDefinition {
+    name: string;
+    description: string;
+    parameters: { type: "object"; [key: string]: unknown };
+}
+
+/** Parse a provider's JSON-string arguments and require a top-level object. */
+export function parseToolArguments(name: string, argumentsJson: string): Record<string, unknown> {
+    let json: unknown;
+    try {
+        json = JSON.parse(argumentsJson);
+    } catch (error) {
+        throw new Error(`Invalid JSON arguments for ${name}: ${String(error)}`);
+    }
+
+    const parsed = ToolArgumentsSchema.safeParse(json);
+    if (!parsed.success) {
+        throw new Error(`Invalid arguments for ${name}: ${z.prettifyError(parsed.error)}`);
+    }
+    return parsed.data;
+}
+
+export const TOOL_DEFINITIONS: ToolDefinition[] = [
+    { name: "bash", description: "run bash commands", parameters: z.toJSONSchema(BashSchema) as ToolDefinition["parameters"] },
+    { name: "read_file", description: "read a file content", parameters: z.toJSONSchema(ReadFileSchema) as ToolDefinition["parameters"] },
+    { name: "write_file", description: "write content to a file", parameters: z.toJSONSchema(WriteFileSchema) as ToolDefinition["parameters"] },
+    { name: "edit_file", description: "replace text in a file", parameters: z.toJSONSchema(EditFileSchema) as ToolDefinition["parameters"] },
 ];
 
 // map tool to function and dispatch correspondingly
@@ -115,4 +120,3 @@ async function runEditFile(args: unknown): Promise<string> {
     }
     return "replace file successfully";
 }
-

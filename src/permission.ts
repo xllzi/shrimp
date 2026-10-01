@@ -1,4 +1,4 @@
-import type { Responses } from "openai/resources/responses";
+import type { ToolCall } from "./llm.ts";
 import { Parser, Language, type Node as SyntaxNode } from "web-tree-sitter";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -36,7 +36,7 @@ const SYSTEM_ROOTS = new Set(["/", "/*", "~", "~/*", "$HOME", "$HOME/*", "${HOME
  * ask permission will trigger askPermission directly
  * eventually output only two kind of permission: allow or deny and message
  */
-export async function permissionCheck(call: Responses.ResponseFunctionToolCall): Promise<Finding> {
+export async function permissionCheck(call: ToolCall): Promise<Finding> {
     let permission: Permission = "allow"
     let message = "";
     for (let rule of PERMISSION_RULES) {
@@ -54,9 +54,9 @@ export async function permissionCheck(call: Responses.ResponseFunctionToolCall):
     return {permission, message};
 }
 
-export async function askPermission(toolCall: Responses.ResponseFunctionToolCall): Promise<Permission> {
+export async function askPermission(toolCall: ToolCall): Promise<Permission> {
     console.log("tool call: ", toolCall.name);
-    console.log(toolCall.arguments);
+    console.log(JSON.stringify(toolCall.arguments));
     let permission!: Permission;
     const rl = readline.createInterface({
         input: process.stdin,
@@ -192,13 +192,13 @@ export function bashVerdict(commands: string): Verdict {
 
 interface PermissionRule {
     tools: string[],
-    check: (toolCall: Responses.ResponseFunctionToolCall) => Verdict,
+    check: (toolCall: ToolCall) => Verdict,
 }
 
 export const PERMISSION_RULES: PermissionRule[] = [
     {
         tools: ["bash"],
-        check: (call) => bashVerdict(String(JSON.parse(call.arguments).commands ?? "")),
+        check: (call) => bashVerdict(String(call.arguments.commands ?? "")),
     },
     {
         tools: ["write_file", "edit_file"],
@@ -206,9 +206,8 @@ export const PERMISSION_RULES: PermissionRule[] = [
     }
 ];
 
-function outOfWorkspace(toolCall: Responses.ResponseFunctionToolCall): Verdict {
-    let args = JSON.parse(toolCall.arguments);
-    let dir = path.dirname(args.filePath);
+function outOfWorkspace(toolCall: ToolCall): Verdict {
+    let dir = path.dirname(String(toolCall.arguments.filePath ?? ""));
     if (process.cwd() === "/") return null;
     while (dir !== "/") {
         if (dir === process.cwd()) {
@@ -218,4 +217,3 @@ function outOfWorkspace(toolCall: Responses.ResponseFunctionToolCall): Verdict {
     }
     return { permission: "ask", message: "writes outside the workspace" };
 }
-
