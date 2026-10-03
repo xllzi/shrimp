@@ -174,8 +174,27 @@ const openAIResponsesAdapter: LlmAdapter = async (request) => {
         ...(request.systemPrompt === undefined ? {} : { instructions: request.systemPrompt }),
         input: request.messages.flatMap(messageToResponseInput),
         tools: toOpenAITools(request.tools),
+        stream: true
     });
-    return responseOutputToMessage(response.output);
+    // stream tokens
+    for await (const event of response) {
+        if (event.type === "response.output_item.added" &&
+               event.item.type === "reasoning") {
+            console.log("\nThinking...");
+        } else if (event.type === "response.reasoning_text.delta") {
+            process.stdout.write(event.delta);
+        } else if (event.type === "response.reasoning_text.done") {
+            console.log();
+        } else if (event.type === "response.output_text.delta") {
+            process.stdout.write(event.delta);
+        } else if (event.type === "error") {
+            throw new Error(event.message);
+        } else if (event.type === "response.completed") {
+            console.log("\nReponse completed.");
+            return responseOutputToMessage(event.response.output);
+        }
+    }
+    throw new Error("Stream ended without a completed response");
 };
 
 export function messageToAnthropicMessages(messages: Message[]): MessageParam[] {

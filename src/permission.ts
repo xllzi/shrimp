@@ -3,6 +3,8 @@ import { Parser, Language, type Node as SyntaxNode } from "web-tree-sitter";
 import { createRequire } from "node:module";
 import path from "node:path";
 import readline from "node:readline/promises";
+import { ReadInterface } from "./main.ts"
+
 /**
  * permission gate
  * allow: safe, runs without asking
@@ -58,17 +60,16 @@ export async function askPermission(toolCall: ToolCall): Promise<Permission> {
     console.log("tool call: ", toolCall.name);
     console.log(JSON.stringify(toolCall.arguments));
     let permission!: Permission;
-    const rl = readline.createInterface({
+    const ReadInterface = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
     })
     while (permission === undefined) {
-        const answer = await rl.question("Approve this tool call? [y/n]");
+        const answer = await ReadInterface.question("Approve this tool call? [y/n]");
         if (answer === 'y') permission = "allow";
         else if (answer === 'n') permission = "deny";
         else console.log("input y or n");
     }
-    rl.close();
     return permission;
 }
 

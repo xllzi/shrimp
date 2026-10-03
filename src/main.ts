@@ -63,29 +63,25 @@ async function runTool(call: ToolCall): Promise<string> {
     }
     return output;
 }
+
+export const ReadInterface = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+})
 /**
  * main entry point
  */
 async function main() {
     let query = "";
     const history: Message[] = [];
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-    })
     while (1) {
-        query = await rl.question("> ");
+        query = await ReadInterface.question("> ");
         if (query === ":q") break;
         query = await applyUserPromptSubmit({ query, history });
         history.push({ role: "user", content: [{ type: "text", text: query }] });
         const response = await agentLoop(history);
-        console.log("-----LLM reply-----");
-        console.log(response.content
-            .filter((block) => block.type === "text" || block.type === "refusal")
-            .map((block) => block.type === "text" ? block.text : block.refusal)
-            .join("\n"));
     }
-    rl.close();
+    ReadInterface.close()
 }
 
 main();
