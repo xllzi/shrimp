@@ -5,8 +5,8 @@ import { applyUserPromptSubmit, applyPreToolUse, applyPostToolUse, applyStop } f
 import { llmStream, type Message, type ModelConfig, type ToolCall } from "./llm.ts";
 
 const MODEL: ModelConfig = {
-    api: "openai-responses",
-    model: "qwen3.8-27b",
+    api: "anthropic-messages",
+    model: "deepseek-flash",
 };
 
 /**

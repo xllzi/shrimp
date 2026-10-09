@@ -178,19 +178,26 @@ const openAIResponsesAdapter: LlmAdapter = async (request) => {
     });
     // stream tokens
     for await (const event of response) {
-        if (event.type === "response.output_item.added" &&
-               event.item.type === "reasoning") {
-            console.log("\nThinking...");
+        if (event.type === "response.output_item.added") {
+            switch (event.item.type) {
+                case "reasoning":
+                    console.log("Thinking...");
+                    break;
+                case "message":
+                    console.log("Responding...");
+                    break;
+            }
         } else if (event.type === "response.reasoning_text.delta") {
             process.stdout.write(event.delta);
         } else if (event.type === "response.reasoning_text.done") {
             console.log();
         } else if (event.type === "response.output_text.delta") {
             process.stdout.write(event.delta);
+        } else if (event.type === "response.output_item.done") {
+            console.log();
         } else if (event.type === "error") {
             throw new Error(event.message);
         } else if (event.type === "response.completed") {
-            console.log("\nReponse completed.");
             return responseOutputToMessage(event.response.output);
         }
     }
@@ -280,7 +287,7 @@ export function anthropicMessageToMessage(
 
 const anthropicMessagesAdapter: LlmAdapter = async (request) => {
     const client = new Anthropic();
-    const response = await client.messages.create({
+    const response = client.messages.stream({
         model: request.model.model,
         max_tokens: request.model.maxOutputTokens ?? 4096,
         messages: messageToAnthropicMessages(request.messages),
@@ -293,7 +300,40 @@ const anthropicMessagesAdapter: LlmAdapter = async (request) => {
             })),
         } : {}),
     });
-    return anthropicMessageToMessage(response);
+    
+    try {
+        for await (const event of response) {
+            if (event.type === "content_block_start") {
+                switch (event.content_block.type) {
+                  case "thinking":
+                    console.log("Thinking...");
+                    break;
+                  case "text":
+                    console.log("Responding...");
+                    break;
+                }
+            } else if (event.type === "content_block_delta") {
+                switch (event.delta.type) {
+                  case "thinking_delta":
+                    process.stdout.write(event.delta.thinking);
+                    break;
+                  case "text_delta":
+                    process.stdout.write(event.delta.text);
+                    break;
+                }
+            } else if (event.type === "content_block_stop") {
+                console.log();
+            } else if (event.type === "message_stop") {
+                return anthropicMessageToMessage(await response.finalMessage());
+            }
+        }
+    } catch (error) {
+        console.error(
+            "Anthropic stream failed"
+        );
+        throw error;
+    }
+    throw new Error("Stream ended without a completed response");
 };
 
 export const LLM_ADAPTERS: LlmAdapters = {
