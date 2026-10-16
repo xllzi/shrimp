@@ -43,6 +43,12 @@ export interface ToolCall {
     arguments: Record<string, unknown>;
 }
 
+// An invalid call keeps the original JSON text so the model can correct its arguments.
+export interface InvalidToolCall extends Omit<ToolCall, "arguments"> {
+    rawArguments: string;
+    argumentError: string;
+}
+
 export interface UserMessage {
     role: "user";
     content: TextContent[];
@@ -50,7 +56,7 @@ export interface UserMessage {
 
 export interface AssistantMessage {
     role: "assistant";
-    content: (TextContent | RefusalContent | ThinkingContent | RedactedThinkingContent | ToolCall)[];
+    content: (TextContent | RefusalContent | ThinkingContent | RedactedThinkingContent | ToolCall | InvalidToolCall)[];
 }
 
 export interface ToolResultMessage {
@@ -73,6 +79,15 @@ export interface LlmRequest {
 
 export type LlmAdapter = (request: LlmRequest) => Promise<AssistantMessage>;
 export type LlmAdapters = Record<LlmApi, LlmAdapter>;
+
+/** If the arguments fail the JSON object check, keep the tool call for an error result. */
+function parseToolCall(call: Omit<ToolCall, "arguments">, argumentsJson: string): ToolCall | InvalidToolCall {
+    try {
+        return { ...call, arguments: parseToolArguments(call.name, argumentsJson) };
+    } catch (error) {
+        return { ...call, rawArguments: argumentsJson, argumentError: String(error) };
+    }
+}
 
 export function responseOutputToMessage(
     output: Responses.ResponseOutputItem[],
@@ -100,13 +115,12 @@ export function responseOutputToMessage(
                 }
             }
         } else if (item.type === "function_call") {
-            content.push({
+            content.push(parseToolCall({
                 type: "toolCall",
                 id: item.call_id,
                 ...(item.id === undefined ? {} : { itemId: item.id }),
                 name: item.name,
-                arguments: parseToolArguments(item.name, item.arguments),
-            });
+            }, item.arguments));
         }
     }
 
@@ -150,7 +164,8 @@ export function messageToResponseInput(message: Message): Responses.ResponseInpu
                 ...(block.itemId === undefined ? {} : { id: block.itemId }),
                 call_id: block.id,
                 name: block.name,
-                arguments: JSON.stringify(block.arguments),
+                // Keep the invalid JSON text in the history without a replacement value.
+                arguments: "argumentError" in block ? block.rawArguments : JSON.stringify(block.arguments),
             });
         }
     }
@@ -246,7 +261,8 @@ export function messageToAnthropicMessages(messages: Message[]): MessageParam[] 
                         type: "tool_use" as const,
                         id: block.id,
                         name: block.name,
-                        input: block.arguments,
+                        // Restore the original input value, including a value other than an object.
+                        input: "argumentError" in block ? JSON.parse(block.rawArguments) : block.arguments,
                     });
                 }
             }
@@ -276,12 +292,11 @@ export function anthropicMessageToMessage(
         } else if (block.type === "redacted_thinking") {
             content.push({ type: "redactedThinking", data: block.data });
         } else if (block.type === "tool_use") {
-            content.push({
+            content.push(parseToolCall({
                 type: "toolCall",
                 id: block.id,
                 name: block.name,
-                arguments: parseToolArguments(block.name, JSON.stringify(block.input)),
-            });
+            }, JSON.stringify(block.input)));
         }
     }
     return { role: "assistant", content };

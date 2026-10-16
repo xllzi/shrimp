@@ -19,7 +19,7 @@ const WriteFileSchema = z.object({
 
 const EditFileSchema = z.object({
     filePath: z.string(),
-    oldText: z.string(),
+    oldText: z.string().min(1, "'oldText' must not be empty."),
     newText: z.string(),
 })
 
@@ -31,7 +31,10 @@ export interface ToolDefinition {
     parameters: { type: "object"; [key: string]: unknown };
 }
 
-/** Parse the JSON arguments from the provider. Reject values other than objects. */
+/**
+ * Parse the JSON arguments from the provider. Reject values other than objects.
+ * The message converter catches parse errors and keeps the call for an error result.
+ */
 export function parseToolArguments(name: string, argumentsJson: string): Record<string, unknown> {
     let json: unknown;
     try {
@@ -49,10 +52,22 @@ export function parseToolArguments(name: string, argumentsJson: string): Record<
 
 // The model uses these definitions to select tools and supply arguments.
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
-    { name: "bash", description: "run bash commands", parameters: z.toJSONSchema(BashSchema) as ToolDefinition["parameters"] },
-    { name: "read_file", description: "read a file content", parameters: z.toJSONSchema(ReadFileSchema) as ToolDefinition["parameters"] },
-    { name: "write_file", description: "write content to a file", parameters: z.toJSONSchema(WriteFileSchema) as ToolDefinition["parameters"] },
-    { name: "edit_file", description: "replace text in a file", parameters: z.toJSONSchema(EditFileSchema) as ToolDefinition["parameters"] },
+    { name: "bash", 
+      description: "run bash commands", 
+      parameters: z.toJSONSchema(BashSchema) as ToolDefinition["parameters"] 
+    },
+    { name: "read_file", 
+      description: "read a file's content",
+      parameters: z.toJSONSchema(ReadFileSchema) as ToolDefinition["parameters"] 
+    },
+    { name: "write_file", 
+      description: "write content to a file",
+      parameters: z.toJSONSchema(WriteFileSchema) as ToolDefinition["parameters"] 
+    },
+    { name: "edit_file",
+      description: "Replace text in a file. The 'oldText' value must match exactly once.",
+      parameters: z.toJSONSchema(EditFileSchema) as ToolDefinition["parameters"] 
+    },
 ];
 
 export type ToolFn = (...arg: any) => string | Promise<string>; 
@@ -112,15 +127,24 @@ async function runWriteFile(args: unknown): Promise<string> {
 async function runEditFile(args: unknown): Promise<string> {
     const res = EditFileSchema.safeParse(args);
     if (!res.success) {
-        return `edit_file parameters verfication fail: ${z.prettifyError(res.error)}`;
+        return `Error: Invalid \`edit_file\` arguments: ${z.prettifyError(res.error)}`;
     }
     let filePath = res.data.filePath;
     let oldText = res.data.oldText;
     let newText = res.data.newText;
     try {
         const text = await readFile(filePath, 'utf8');
-        // Replace only the first literal match. A missing match leaves the content unchanged.
-        await writeFile(filePath, text.replace(oldText, newText));
+        const matchStart = text.indexOf(oldText);
+        if (matchStart === -1) {
+            return "Error: The content does not contain `oldText`. Before you retry, use `read_file`.";
+        }
+        // Reject a second match, including a match that overlaps the first one.
+        if (text.indexOf(oldText, matchStart + 1) !== -1) {
+            return "Error: The content contains `oldText` more than one time. Add more context to `oldText`.";
+        }
+        // Insert the replacement text as literal content.
+        const updatedText = text.slice(0, matchStart) + newText + text.slice(matchStart + oldText.length);
+        await writeFile(filePath, updatedText);
     } catch (err) {
         return String(err);
     }

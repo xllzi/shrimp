@@ -1,7 +1,7 @@
 import { permissionCheck, type Finding } from "./permission.ts";
 import { TOOL_DEFINITIONS, TOOL_HANDLERS } from "./tools.ts";
 import { applyPreToolUse, applyPostToolUse, applyStop } from "./hooks.ts";
-import { llmStream, type AssistantMessage, type Message, type ModelConfig, type ToolCall } from "./llm.ts";
+import { llmStream, type AssistantMessage, type InvalidToolCall, type Message, type ModelConfig, type ToolCall } from "./llm.ts";
 
 const MODEL: ModelConfig = {
     api: "anthropic-messages",
@@ -43,7 +43,7 @@ export async function agentLoop(messages: Message[], signal?: AbortSignal): Prom
         if (signal?.aborted) return { stop_reason: "cancelled" };
         // Keep the response before its tool results in the message history.
         messages.push(response);
-        const toolCalls = response.content.filter((item): item is ToolCall => item.type === "toolCall");
+        const toolCalls = response.content.filter((item): item is ToolCall | InvalidToolCall => item.type === "toolCall");
         if (toolCalls.length > 0) {
             // Run the tool calls in the order of the response.
             for (let call of toolCalls) {
@@ -51,6 +51,9 @@ export async function agentLoop(messages: Message[], signal?: AbortSignal): Prom
                 // Keep a result for each call, even if cancellation prevents its execution.
                 if (signal?.aborted) {
                     output = "Tool execution cancelled before it started.";
+                } else if ("argumentError" in call) {
+                    // Report the parse error without hooks, permission checks, or tool execution.
+                    output = call.argumentError;
                 } else {
                     // The hook can change the tool call. Check permission for the changed call.
                     call = await applyPreToolUse(call);

@@ -178,6 +178,68 @@ test("an Anthropic response becomes one canonical assistant Message", () => {
     });
 });
 
+test("OpenAI tool calls keep invalid arguments and valid calls in the same response", () => {
+    for (const argumentsJson of [' {"commands": ', "[]", "null", '"pwd"', "42", "true"]) {
+        const invalid: Responses.ResponseFunctionToolCall = {
+            type: "function_call",
+            id: "fc_invalid",
+            call_id: "call_invalid",
+            name: "bash",
+            arguments: argumentsJson,
+            status: "completed",
+        };
+        const message = responseOutputToMessage([invalid, providerOutput[2]!]);
+        const call = message.content[0];
+        assert.ok(call?.type === "toolCall" && "argumentError" in call);
+        assert.equal(call.id, invalid.call_id);
+        assert.equal(call.name, invalid.name);
+        assert.equal(call.rawArguments, argumentsJson);
+        assert.match(call.argumentError, /Invalid (JSON )?arguments for bash/);
+        assert.equal("arguments" in call, false);
+        assert.deepEqual(message.content[1], openAIAssistantMessage.content[2]);
+        assert.deepEqual(messageToResponseInput(message)[0], {
+            type: "function_call",
+            id: invalid.id,
+            call_id: invalid.call_id,
+            name: invalid.name,
+            arguments: argumentsJson,
+        });
+    }
+});
+
+test("Anthropic tool calls keep input values other than objects in the history", () => {
+    for (const input of [[], null, "pwd", 42, true]) {
+        const block = { type: "tool_use" as const, id: "call_invalid", name: "bash", input, caller: { type: "direct" as const } };
+        const message = anthropicMessageToMessage({ content: [block] });
+        const call = message.content[0];
+        assert.ok(call?.type === "toolCall" && "argumentError" in call);
+        assert.equal(call.id, block.id);
+        assert.equal(call.name, block.name);
+        assert.equal(call.rawArguments, JSON.stringify(input));
+        assert.match(call.argumentError, /Invalid arguments for bash/);
+        assert.equal("arguments" in call, false);
+        assert.deepEqual(messageToAnthropicMessages([message]), [{
+            role: "assistant",
+            content: [{ type: "tool_use", id: block.id, name: block.name, input }],
+        }]);
+    }
+});
+
+test("the message converter leaves tool field checks to the tool handler", () => {
+    const message = responseOutputToMessage([{
+        type: "function_call",
+        call_id: "call_fields",
+        name: "read_file",
+        arguments: '{"filePath":123}',
+    }]);
+    assert.deepEqual(message.content, [{
+        type: "toolCall",
+        id: "call_fields",
+        name: "read_file",
+        arguments: { filePath: 123 },
+    }]);
+});
+
 test("createLlmStream routes a fake model and returns its canonical assistant Message", async () => {
     const calls: string[] = [];
     const llmStream = createLlmStream({
