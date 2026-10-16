@@ -3,7 +3,6 @@ import { Parser, Language, type Node as SyntaxNode } from "web-tree-sitter";
 import { createRequire } from "node:module";
 import path from "node:path";
 import readline from "node:readline/promises";
-import { ReadInterface } from "./main.ts"
 
 /**
  * permission gate

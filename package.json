@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --experimental-strip-types --test src/llm.test.ts src/permission.test.ts",
+    "test": "node --experimental-strip-types --test --test-isolation=none src/llm.test.ts src/permission.test.ts src/agent.test.ts src/main.test.ts",
     "dev": "node --env-file=.env src/main.ts",
     "check": "tsc --noEmit"
   },

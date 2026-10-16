@@ -67,6 +67,8 @@ export interface LlmRequest {
     messages: Message[];
     systemPrompt?: string;
     tools?: ToolDefinition[];
+    /** The caller uses this signal to cancel the model request. */
+    signal?: AbortSignal;
 }
 
 export type LlmAdapter = (request: LlmRequest) => Promise<AssistantMessage>;
@@ -175,8 +177,8 @@ const openAIResponsesAdapter: LlmAdapter = async (request) => {
         input: request.messages.flatMap(messageToResponseInput),
         tools: toOpenAITools(request.tools),
         stream: true
-    });
-    // stream tokens
+    }, { signal: request.signal });
+    // The SDK uses the signal to stop the HTTP request and the response stream.
     for await (const event of response) {
         if (event.type === "response.output_item.added") {
             switch (event.item.type) {
@@ -299,8 +301,8 @@ const anthropicMessagesAdapter: LlmAdapter = async (request) => {
                 input_schema: tool.parameters,
             })),
         } : {}),
-    });
-    
+    }, { signal: request.signal });
+
     try {
         for await (const event of response) {
             if (event.type === "content_block_start") {
@@ -328,9 +330,8 @@ const anthropicMessagesAdapter: LlmAdapter = async (request) => {
             }
         }
     } catch (error) {
-        console.error(
-            "Anthropic stream failed"
-        );
+        // A user cancellation is not a model error.
+        if (!request.signal?.aborted) console.error("Anthropic stream failed");
         throw error;
     }
     throw new Error("Stream ended without a completed response");
