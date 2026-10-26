@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile, watch } from "node:fs/promises";
+import { getEventListeners } from "node:events";
+import { setTimeout } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -81,3 +83,68 @@ test("edit_file rejects changed content until read_file refreshes the saved hash
     assert.equal(await TOOL_HANDLERS.edit_file(args, state), "replace file successfully");
     assert.equal(await readFile(filePath, "utf8"), "alpha delta gamma");
 });
+
+test("bash cancellation stops the shell and its child commands", { skip: process.platform === "win32", timeout: 3000 }, async (t) => {
+    const directory = await mkdtemp(path.join(tmpdir(), "shrimp-bash-cancel-"));
+    const controller = new AbortController();
+    t.after(async () => {
+        controller.abort();
+        await rm(directory, { recursive: true, force: true });
+    });
+    const readyPath = path.join(directory, "ready");
+    const leakedPath = path.join(directory, "leaked");
+    const watcher = watch(directory);
+    const ready = (async () => {
+        for await (const event of watcher) {
+            if (event.filename === "ready") return;
+        }
+    })();
+    const state: State = { messages: [], turnCount: 0, readFileHashes: new Map() };
+    const pending = TOOL_HANDLERS.bash({
+        commands: `trap '' TERM; (sleep 0.2; printf leaked > '${leakedPath}') & printf ready > '${readyPath}'; wait`,
+    }, state, controller.signal);
+    const rejected = assert.rejects(Promise.resolve(pending), error => error === controller.signal.reason);
+    await ready;
+    controller.abort();
+    await rejected;
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+    await setTimeout(300);
+    await assert.rejects(stat(leakedPath), { code: "ENOENT" });
+    assert.equal(await TOOL_HANDLERS.bash({ commands: "printf recovered" }, state), "recovered");
+});
+
+test("bash preserves stdout and reports command failures", async () => {
+    const state: State = { messages: [], turnCount: 0, readFileHashes: new Map() };
+    assert.equal(await TOOL_HANDLERS.bash({ commands: "printf hello" }, state), "hello");
+    await assert.rejects(Promise.resolve(TOOL_HANDLERS.bash({ commands: "printf failure >&2; exit 7" }, state)), /failed \(7\): failure/);
+});
+
+for (const name of ["bash", "read_file", "write_file", "edit_file"] as const) {
+    test(`${name} rejects an already cancelled signal without changing the file`, async (t) => {
+        const filePath = await createFile(t, "original");
+        const controller = new AbortController();
+        controller.abort("user-cancel");
+        const state: State = { messages: [], turnCount: 0, readFileHashes: new Map() };
+        await assert.rejects(Promise.resolve(TOOL_HANDLERS[name]({
+            filePath, commands: `printf changed > '${filePath}'`, content: "changed", oldText: "original", newText: "changed",
+        }, state, controller.signal)), error => error === "user-cancel");
+        assert.equal(await readFile(filePath, "utf8"), "original");
+        assert.equal(state.readFileHashes.size, 0);
+    });
+}
+
+for (const name of ["read_file", "write_file", "edit_file"] as const) {
+    test(`${name} cancels an active file operation`, async (t) => {
+        const filePath = await createFile(t, "original");
+        const state: State = { messages: [], turnCount: 0, readFileHashes: new Map() };
+        await TOOL_HANDLERS.read_file({ filePath }, state);
+        const previousHash = state.readFileHashes.get(filePath);
+        const controller = new AbortController();
+        const pending = TOOL_HANDLERS[name]({ filePath, content: "changed", oldText: "original", newText: "changed" }, state, controller.signal);
+        const rejected = assert.rejects(Promise.resolve(pending), error => error === controller.signal.reason);
+        controller.abort();
+        await rejected;
+        assert.equal(state.readFileHashes.get(filePath), previousHash);
+        if (name === "edit_file") assert.equal(await readFile(filePath, "utf8"), "original");
+    });
+}

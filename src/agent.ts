@@ -59,16 +59,22 @@ export async function agentLoop(state: State, signal?: AbortSignal): Promise<Age
                     // Report the parse error without hooks, permission checks, or tool execution.
                     output = call.argumentError;
                 } else {
-                    // The hook can change the tool call. Check permission for the changed call.
-                    call = await applyPreToolUse(call);
-                    let finding: Finding = await permissionCheck(call);
-                    if (finding.permission === "allow") {
-                        output = await runTool(call, state);
-                    } else {
-                        // Report the denial to the model. Do not run the tool.
-                        output = finding.permission + ": " + finding.message;
+                    try {
+                        // Check cancellation after hooks and permission prompts too.
+                        call = await applyPreToolUse(call);
+                        signal?.throwIfAborted();
+                        let finding: Finding = await permissionCheck(call, signal);
+                        signal?.throwIfAborted();
+                        if (finding.permission === "allow") {
+                            output = await runTool(call, state, signal);
+                        } else {
+                            output = finding.permission + ": " + finding.message;
+                        }
+                        if (!signal?.aborted) output = await applyPostToolUse(call, output);
+                    } catch (error) {
+                        if (!signal?.aborted) throw error;
+                        output = "Tool execution cancelled.";
                     }
-                    output = await applyPostToolUse(call, output);
                 }
                 // Link the result to the tool call so the model can use it.
                 messages.push({
@@ -89,13 +95,15 @@ export async function agentLoop(state: State, signal?: AbortSignal): Promise<Age
     }
 }
 
-async function runTool(call: ToolCall, state: State): Promise<string> {
+async function runTool(call: ToolCall, state: State, signal?: AbortSignal): Promise<string> {
     let output: string;
     // dispatch function and executed
     let fn = TOOL_HANDLERS[call.name];
     try {
-        output = await fn(call.arguments, state);
+        signal?.throwIfAborted();
+        output = await fn(call.arguments, state, signal);
     } catch (error) {
+        signal?.throwIfAborted();
         output = String(error);
     }
     return output;

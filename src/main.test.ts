@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, watch } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -11,13 +11,24 @@ const transport = `
 let requests = 0;
 globalThis.fetch = async (_input, init) => {
     requests++;
-    if (requests <= 2) {
+    const phase = process.env.TEST_CANCEL_PHASE;
+    if (requests <= 2 && phase === "request") {
         process.stdout.write("TEST_WAIT_" + requests + "\\n");
         return new Promise((_, reject) => {
             init.signal.addEventListener("abort", () => reject(init.signal.reason), { once: true });
         });
     }
-    const events = [
+    const tool = requests <= 2;
+    const commands = phase === "permission" ? "bash -c 'sleep 60'"
+        : "sleep 60 & printf ready > '" + process.env.TEST_TOOL_DIRECTORY + "/ready-" + requests + "'; wait";
+    const events = tool ? [
+        { type: "message_start", message: { id: "test", type: "message", role: "assistant", content: [], model: "test", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-" + requests, name: "bash", input: {} } },
+        { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify({ commands }) } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 1 } },
+        { type: "message_stop" },
+    ] : [
         { type: "message_start", message: { id: "test", type: "message", role: "assistant", content: [], model: "test", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
         { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
         { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "TEST_COMPLETE" } },
@@ -31,7 +42,8 @@ globalThis.fetch = async (_input, init) => {
 `;
 
 for (const launcher of ["node", "npm"] as const) {
-    test(`${launcher} keeps the input prompt after cancellation and a late SIGINT`, {
+  for (const phase of ["request", "tool", "permission"] as const) {
+    test(`${launcher} keeps the input prompt after ${phase} cancellation and a late SIGINT`, {
         skip: process.platform === "win32",
         timeout: 5000,
     }, async (t) => {
@@ -50,6 +62,8 @@ for (const launcher of ["node", "npm"] as const) {
             env: {
                 ...process.env,
                 ANTHROPIC_API_KEY: "local-test-key",
+                TEST_CANCEL_PHASE: phase,
+                TEST_TOOL_DIRECTORY: directory,
                 NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
                 npm_config_cache: path.join(directory, "npm-cache"),
             },
@@ -92,16 +106,28 @@ for (const launcher of ["node", "npm"] as const) {
             });
         }
 
+        async function expectActive(index: number) {
+            if (phase !== "tool") {
+                await expect(phase === "request" ? `TEST_WAIT_${index}` : "Approve this tool call? [y/n]");
+                return;
+            }
+            for await (const event of watch(directory, { signal: t.signal })) {
+                if (event.filename === `ready-${index}`) return;
+            }
+        }
+
         await expect("> ");
+        const firstActive = expectActive(1);
         child.stdin.write("first\n");
-        await expect("TEST_WAIT_1");
+        await firstActive;
         process.kill(-child.pid!, "SIGINT");
         await expect("Cancelled.");
         await expect("> ");
 
         process.kill(-child.pid!, "SIGINT");
+        const secondActive = expectActive(2);
         child.stdin.write("second\n");
-        await expect("TEST_WAIT_2");
+        await secondActive;
         process.kill(-child.pid!, "SIGINT");
         await expect("Cancelled.");
         await expect("> ");
@@ -113,4 +139,5 @@ for (const launcher of ["node", "npm"] as const) {
         child.stdin.write(":q\n");
         assert.deepEqual(await exit, [0, null]);
     });
+  }
 }

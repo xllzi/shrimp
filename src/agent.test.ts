@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { agentLoop } from "./agent.ts";
+import { agentLoop, type State } from "./agent.ts";
 import { LLM_ADAPTERS, responseOutputToMessage, messageToResponseInput, type AssistantMessage, type LlmApi, type LlmRequest, type Message } from "./llm.ts";
-import { TOOL_HANDLERS } from "./tools.ts";
+import { TOOL_HANDLERS, type ToolFn } from "./tools.ts";
+import { onPreToolUse, onPostToolUse } from "./hooks.ts";
 
 function deferred<T = void>() {
     let resolve!: (value: T | PromiseLike<T>) => void;
@@ -68,14 +69,14 @@ test("the model can correct invalid JSON while valid calls in the same response 
         return reply;
     });
     const read = t.mock.method(TOOL_HANDLERS, "read_file", async () => "The sibling tool completed.");
-    const bash = t.mock.method(TOOL_HANDLERS, "bash", async () => "The corrected tool completed.");
+    const bash = t.mock.method(TOOL_HANDLERS, "bash", async (..._args: Parameters<ToolFn>) => "The corrected tool completed.");
 
     const state = { messages, turnCount: 0, readFileHashes: new Map<string, string>() };
     assert.deepEqual(await agentLoop(state), { stop_reason: "completed", message: reply });
     assert.equal(requests, 3);
     assert.equal(read.mock.callCount(), 1);
     assert.equal(bash.mock.callCount(), 1);
-    assert.deepEqual(bash.mock.calls[0]!.arguments, [{ commands: "pwd" }, state]);
+    assert.deepEqual(bash.mock.calls[0]!.arguments, [{ commands: "pwd" }, state, undefined]);
     assert.equal(bash.mock.calls[0]!.arguments[1], state);
 });
 
@@ -149,6 +150,78 @@ test("cancellation skips pending tools and keeps their result messages", async (
         { role: "tool", toolCallId: "first", toolName: "read_file", content: [{ type: "text", text: "The first tool completed." }] },
         { role: "tool", toolCallId: "second", toolName: "read_file", content: [{ type: "text", text: "Tool execution cancelled before it started." }] },
     ]);
+});
+
+test("cancellation reaches the active tool, skips later tools and hooks, and allows another run", { timeout: 3000 }, async (t) => {
+    const controller = new AbortController();
+    const started = deferred();
+    const messages = history();
+    const state = { messages, turnCount: 0, readFileHashes: new Map<string, string>() };
+    const adapter = t.mock.method(LLM_ADAPTERS, "anthropic-messages", async (): Promise<AssistantMessage> => ({
+        role: "assistant",
+        content: [
+            { type: "toolCall", id: "active-cancel", name: "read_file", arguments: { filePath: "active" } },
+            { type: "toolCall", id: "pending-cancel", name: "read_file", arguments: { filePath: "pending" } },
+        ],
+    }));
+    let postCalls = 0;
+    onPostToolUse((call, output) => {
+        if (call.id === "active-cancel" || call.id === "pending-cancel") postCalls++;
+        return output;
+    });
+    const tool = t.mock.method(TOOL_HANDLERS, "read_file", async (_args: unknown, receivedState: State, signal?: AbortSignal) => {
+        assert.equal(receivedState, state);
+        assert.equal(signal, controller.signal);
+        started.resolve();
+        return new Promise<string>((_, reject) => {
+            signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
+        });
+    });
+
+    const pending = agentLoop(state, controller.signal);
+    await started.promise;
+    controller.abort("user-cancel");
+    assert.deepEqual(await pending, { stop_reason: "cancelled" });
+    assert.equal(tool.mock.callCount(), 1);
+    assert.equal(adapter.mock.callCount(), 1);
+    assert.equal(postCalls, 0);
+    assert.deepEqual(messages.slice(2), [
+        { role: "tool", toolCallId: "active-cancel", toolName: "read_file", content: [{ type: "text", text: "Tool execution cancelled." }] },
+        { role: "tool", toolCallId: "pending-cancel", toolName: "read_file", content: [{ type: "text", text: "Tool execution cancelled before it started." }] },
+    ]);
+    adapter.mock.mockImplementation(async () => reply);
+    assert.deepEqual(await agentLoop(state, new AbortController().signal), { stop_reason: "completed", message: reply });
+});
+
+test("cancellation during a pre-tool hook prevents tool execution", async (t) => {
+    const controller = new AbortController();
+    const messages = history();
+    onPreToolUse(call => {
+        if (call.id === "cancel-in-hook") controller.abort();
+        return call;
+    });
+    t.mock.method(LLM_ADAPTERS, "anthropic-messages", async (): Promise<AssistantMessage> => ({
+        role: "assistant",
+        content: [{ type: "toolCall", id: "cancel-in-hook", name: "read_file", arguments: { filePath: "unused" } }],
+    }));
+    const tool = t.mock.method(TOOL_HANDLERS, "read_file", async () => "Unexpected execution.");
+
+    assert.deepEqual(await agentLoop({ messages, turnCount: 0, readFileHashes: new Map() }, controller.signal), { stop_reason: "cancelled" });
+    assert.equal(tool.mock.callCount(), 0);
+    assert.equal(messages.at(-1)?.role, "tool");
+});
+
+test("ordinary tool errors remain tool results", async (t) => {
+    const messages = history();
+    let requests = 0;
+    t.mock.method(LLM_ADAPTERS, "anthropic-messages", async (): Promise<AssistantMessage> => {
+        if (requests++ > 0) return reply;
+        return { role: "assistant", content: [{ type: "toolCall", id: "failure", name: "read_file", arguments: { filePath: "missing" } }] };
+    });
+    t.mock.method(TOOL_HANDLERS, "read_file", async () => { throw new Error("Read failed."); });
+
+    assert.deepEqual(await agentLoop({ messages, turnCount: 0, readFileHashes: new Map() }), { stop_reason: "completed", message: reply });
+    assert.deepEqual(messages[2], { role: "tool", toolCallId: "failure", toolName: "read_file", content: [{ type: "text", text: "Error: Read failed." }] });
 });
 
 function useTestKey(t: TestContext, api: LlmApi): void {

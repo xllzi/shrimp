@@ -2,7 +2,7 @@ import type { ToolCall } from "./llm.ts";
 import { Parser, Language, type Node as SyntaxNode } from "web-tree-sitter";
 import { createRequire } from "node:module";
 import path from "node:path";
-import readline from "node:readline/promises";
+import { getReadInterface } from "./input.ts";
 
 /**
  * permission gate
@@ -37,7 +37,8 @@ const SYSTEM_ROOTS = new Set(["/", "/*", "~", "~/*", "$HOME", "$HOME/*", "${HOME
  * ask permission will trigger askPermission directly
  * eventually output only two kind of permission: allow or deny and message
  */
-export async function permissionCheck(call: ToolCall): Promise<Finding> {
+export async function permissionCheck(call: ToolCall, signal?: AbortSignal): Promise<Finding> {
+    signal?.throwIfAborted();
     let permission: Permission = "allow"
     let message = "";
     for (let rule of PERMISSION_RULES) {
@@ -49,22 +50,20 @@ export async function permissionCheck(call: ToolCall): Promise<Finding> {
         }
     }
     if (permission === "ask") {
-        permission = await askPermission(call);
+        permission = await askPermission(call, signal);
         message += "\nuser " + permission;
     }
     return {permission, message};
 }
 
-export async function askPermission(toolCall: ToolCall): Promise<Permission> {
+export async function askPermission(toolCall: ToolCall, signal?: AbortSignal): Promise<Permission> {
+    signal?.throwIfAborted();
     console.log("tool call: ", toolCall.name);
     console.log(JSON.stringify(toolCall.arguments));
     let permission!: Permission;
-    const ReadInterface = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-    })
+    const ReadInterface = getReadInterface();
     while (permission === undefined) {
-        const answer = await ReadInterface.question("Approve this tool call? [y/n]");
+        const answer = await ReadInterface.question("Approve this tool call? [y/n]", { signal });
         if (answer === 'y') permission = "allow";
         else if (answer === 'n') permission = "deny";
         else console.log("input y or n");

@@ -1,12 +1,9 @@
-import readline from "node:readline/promises";
+import { getReadInterface } from "./input.ts";
 import { applyUserPromptSubmit } from "./hooks.ts";
 import type { Message } from "./llm.ts";
 import { agentLoop, type State } from "./agent.ts"
 
-export const ReadInterface = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-})
+export const ReadInterface = getReadInterface();
 /**
  * main entry point
  */
