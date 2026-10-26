@@ -24,7 +24,7 @@ test("a model error returns its cause without an assistant message", async (t) =
     const error = new Error("Test request failed.");
     t.mock.method(LLM_ADAPTERS, "anthropic-messages", async () => { throw error; });
 
-    assert.deepEqual(await agentLoop(messages), { stop_reason: "model_error", error });
+    assert.deepEqual(await agentLoop({ messages, turnCount: 0, readFileHashes: new Map<string, string>() }), { stop_reason: "model_error", error });
     assert.equal(messages.length, 1);
 });
 
@@ -70,11 +70,13 @@ test("the model can correct invalid JSON while valid calls in the same response 
     const read = t.mock.method(TOOL_HANDLERS, "read_file", async () => "The sibling tool completed.");
     const bash = t.mock.method(TOOL_HANDLERS, "bash", async () => "The corrected tool completed.");
 
-    assert.deepEqual(await agentLoop(messages), { stop_reason: "completed", message: reply });
+    const state = { messages, turnCount: 0, readFileHashes: new Map<string, string>() };
+    assert.deepEqual(await agentLoop(state), { stop_reason: "completed", message: reply });
     assert.equal(requests, 3);
     assert.equal(read.mock.callCount(), 1);
     assert.equal(bash.mock.callCount(), 1);
-    assert.deepEqual(bash.mock.calls[0]!.arguments, [{ commands: "pwd" }]);
+    assert.deepEqual(bash.mock.calls[0]!.arguments, [{ commands: "pwd" }, state]);
+    assert.equal(bash.mock.calls[0]!.arguments[1], state);
 });
 
 test("a cancelled signal prevents a model request", async (t) => {
@@ -82,7 +84,7 @@ test("a cancelled signal prevents a model request", async (t) => {
     const adapter = t.mock.method(LLM_ADAPTERS, "anthropic-messages", async () => reply);
     controller.abort();
 
-    assert.deepEqual(await agentLoop(history(), controller.signal), { stop_reason: "cancelled" });
+    assert.deepEqual(await agentLoop({ messages: history(), turnCount: 0, readFileHashes: new Map<string, string>() }, controller.signal), { stop_reason: "cancelled" });
     assert.equal(adapter.mock.callCount(), 0);
 });
 
@@ -99,14 +101,14 @@ test("cancellation stops an active request and the next run can complete", { tim
         });
     });
 
-    const pending = agentLoop(messages, controller.signal);
+    const pending = agentLoop({ messages, turnCount: 0, readFileHashes: new Map<string, string>() }, controller.signal);
     await started.promise;
     controller.abort();
     assert.deepEqual(await pending, { stop_reason: "cancelled" });
     assert.equal(messages.length, 1);
 
     adapter.mock.mockImplementation(async () => reply);
-    assert.deepEqual(await agentLoop(messages, new AbortController().signal), {
+    assert.deepEqual(await agentLoop({ messages, turnCount: 0, readFileHashes: new Map<string, string>() }, new AbortController().signal), {
         stop_reason: "completed",
         message: reply,
     });
@@ -121,7 +123,7 @@ test("cancellation takes priority when a response arrives at the same time", asy
         return reply;
     });
 
-    assert.deepEqual(await agentLoop(messages, controller.signal), { stop_reason: "cancelled" });
+    assert.deepEqual(await agentLoop({ messages, turnCount: 0, readFileHashes: new Map<string, string>() }, controller.signal), { stop_reason: "cancelled" });
     assert.equal(messages.length, 1);
 });
 
@@ -140,7 +142,7 @@ test("cancellation skips pending tools and keeps their result messages", async (
         return "The first tool completed.";
     });
 
-    assert.deepEqual(await agentLoop(messages, controller.signal), { stop_reason: "cancelled" });
+    assert.deepEqual(await agentLoop({ messages, turnCount: 0, readFileHashes: new Map<string, string>() }, controller.signal), { stop_reason: "cancelled" });
     assert.equal(adapter.mock.callCount(), 1);
     assert.equal(tool.mock.callCount(), 1);
     assert.deepEqual(messages.slice(2), [

@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, writeFile } from "node:fs/promises";
 import { z } from "zod";
+import type { State } from "./agent.ts";
+import { createHash } from "node:crypto";
 
 // These schemas define the tool parameters and check arguments before execution.
 const BashSchema = z.object({
@@ -79,7 +81,7 @@ export const TOOL_HANDLERS: Record<string, ToolFn> = {
     edit_file: runEditFile,
 };
 
-async function runBash(args: unknown): Promise<string> {
+async function runBash(args: unknown, state: State): Promise<string> {
     const res = BashSchema.safeParse(args);
     if (!res.success) {
         return `bash parameters verification fail: ${z.prettifyError(res.error)}`;
@@ -95,20 +97,24 @@ async function runBash(args: unknown): Promise<string> {
     return output.stdout;
 }
 
-async function runReadFile(args: unknown): Promise<string> {
+async function runReadFile(args: unknown, state: State): Promise<string> {
     const res = ReadFileSchema.safeParse(args);
     if (!res.success) {
         return `read_file parameters verification fail: ${z.prettifyError(res.error)}`;
     }
     let filePath = res.data.filePath;
+    let content;
     try {
-        return await readFile(filePath, 'utf8');
+        content = await readFile(filePath, 'utf8');
     } catch (err) {
         return String(err);
     }
+    let hash = createHash("sha256").update(content, "utf8").digest("hex");
+    state.readFileHashes.set(filePath, hash);
+    return content;
 }
 
-async function runWriteFile(args: unknown): Promise<string> {
+async function runWriteFile(args: unknown, state: State): Promise<string> {
     const res = WriteFileSchema.safeParse(args);
     if (!res.success) {
         return `write_file parameter verification fail: ${z.prettifyError(res.error)}`;
@@ -121,10 +127,12 @@ async function runWriteFile(args: unknown): Promise<string> {
     } catch (err) {
         return String(err);
     }
+    let hash = createHash("sha256").update(content, "utf8").digest("hex");
+    state.readFileHashes.set(filePath, hash);
     return "write file successfully";
 }
 
-async function runEditFile(args: unknown): Promise<string> {
+async function runEditFile(args: unknown, state: State): Promise<string> {
     const res = EditFileSchema.safeParse(args);
     if (!res.success) {
         return `Error: Invalid \`edit_file\` arguments: ${z.prettifyError(res.error)}`;
@@ -133,7 +141,14 @@ async function runEditFile(args: unknown): Promise<string> {
     let oldText = res.data.oldText;
     let newText = res.data.newText;
     try {
+        if (!state.readFileHashes.has(filePath)) {
+            return "Error: `filePath` is never read. You need to read the file first before edit the file";
+        }
         const text = await readFile(filePath, 'utf8');
+        const hash = createHash("sha256").update(text, "utf-8").digest("hex");
+        if (state.readFileHashes.get(filePath) != hash) {
+            return "Error: file content changed. You need to read the file first before edit the file";
+        }
         const matchStart = text.indexOf(oldText);
         if (matchStart === -1) {
             return "Error: The content does not contain `oldText`. Before you retry, use `read_file`.";

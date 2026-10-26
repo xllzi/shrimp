@@ -1,7 +1,7 @@
 import readline from "node:readline/promises";
 import { applyUserPromptSubmit } from "./hooks.ts";
 import type { Message } from "./llm.ts";
-import { agentLoop } from "./agent.ts"
+import { agentLoop, type State } from "./agent.ts"
 
 export const ReadInterface = readline.createInterface({
     input: process.stdin,
@@ -13,6 +13,7 @@ export const ReadInterface = readline.createInterface({
 async function main() {
     let query = "";
     const history: Message[] = [];
+    const state: State = {messages: history, turnCount: 0, readFileHashes: new Map<string, string>()}
     let activeController: AbortController | undefined;
     const cancel = () => {
         if (activeController) {
@@ -36,7 +37,7 @@ async function main() {
             const controller = new AbortController();
             activeController = controller;
             try {
-                const response = await agentLoop(history, controller.signal);
+                const response = await agentLoop(state, controller.signal);
                 if (response.stop_reason === "model_error") {
                     console.error(response.error);
                 } else if (response.stop_reason === "cancelled") {

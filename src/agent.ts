@@ -8,9 +8,10 @@ const MODEL: ModelConfig = {
     model: "deepseek-flash",
 };
 
-type State = {
+export type State = {
     messages: Message[],
-    turnCount: Number
+    turnCount: number,
+    readFileHashes: Map<string, string>
 }
 
 type AgentLoopResult = 
@@ -23,8 +24,10 @@ type AgentLoopResult =
  * Append each response and tool result to `messages` in place.
  * Return a separate result for a model error or a user cancellation.
  */
-export async function agentLoop(messages: Message[], signal?: AbortSignal): Promise<AgentLoopResult> {
+export async function agentLoop(state: State, signal?: AbortSignal): Promise<AgentLoopResult> {
+    let messages = state.messages;
     while (true) {
+        state.turnCount++;
         // After a cancellation, do not start another model request.
         if (signal?.aborted) return { stop_reason: "cancelled" };
         let response: AssistantMessage;
@@ -37,6 +40,7 @@ export async function agentLoop(messages: Message[], signal?: AbortSignal): Prom
                 signal,
             });
         } catch (e) {
+            if (signal?.aborted) return { stop_reason: "cancelled" };
             return {error: e, stop_reason: "model_error"};
         }
         // A cancellation can occur as the model request ends.
@@ -59,7 +63,7 @@ export async function agentLoop(messages: Message[], signal?: AbortSignal): Prom
                     call = await applyPreToolUse(call);
                     let finding: Finding = await permissionCheck(call);
                     if (finding.permission === "allow") {
-                        output = await runTool(call);
+                        output = await runTool(call, state);
                     } else {
                         // Report the denial to the model. Do not run the tool.
                         output = finding.permission + ": " + finding.message;
@@ -85,12 +89,12 @@ export async function agentLoop(messages: Message[], signal?: AbortSignal): Prom
     }
 }
 
-async function runTool(call: ToolCall): Promise<string> {
+async function runTool(call: ToolCall, state: State): Promise<string> {
     let output: string;
     // dispatch function and executed
     let fn = TOOL_HANDLERS[call.name];
     try {
-        output = await fn(call.arguments);
+        output = await fn(call.arguments, state);
     } catch (error) {
         output = String(error);
     }
