@@ -25,7 +25,7 @@ for (const scenario of [
 ]) {
     test(`edit_file rejects ${scenario.name} without a file write`, async (t) => {
         const filePath = await createFile(t, scenario.content);
-        const state: State = { messages: [], turnCount: 0, readFileHashes: new Map<string, string>() };
+        const state: State = { messages: [], loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
         assert.equal(await TOOL_HANDLERS.read_file({ filePath }, state), scenario.content);
         const before = await stat(filePath);
 
@@ -45,7 +45,7 @@ for (const scenario of [
 ]) {
     test(`edit_file accepts ${scenario.name}`, async (t) => {
         const filePath = await createFile(t, scenario.content);
-        const state: State = { messages: [], turnCount: 0, readFileHashes: new Map<string, string>() };
+        const state: State = { messages: [], loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
         assert.equal(await TOOL_HANDLERS.read_file({ filePath }, state), scenario.content);
 
         const output = await TOOL_HANDLERS.edit_file({ filePath, oldText: scenario.oldText, newText: scenario.newText }, state);
@@ -57,7 +57,7 @@ for (const scenario of [
 
 test("edit_file rejects an unread file without a file write", async (t) => {
     const filePath = await createFile(t, "alpha beta");
-    const state: State = { messages: [], turnCount: 0, readFileHashes: new Map<string, string>() };
+    const state: State = { messages: [], loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     const before = await stat(filePath);
 
     const output = await TOOL_HANDLERS.edit_file({ filePath, oldText: "beta", newText: "delta" }, state);
@@ -69,7 +69,7 @@ test("edit_file rejects an unread file without a file write", async (t) => {
 
 test("edit_file rejects changed content until read_file refreshes the saved hash", async (t) => {
     const filePath = await createFile(t, "alpha beta");
-    const state: State = { messages: [], turnCount: 0, readFileHashes: new Map<string, string>() };
+    const state: State = { messages: [], loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     assert.equal(await TOOL_HANDLERS.read_file({ filePath }, state), "alpha beta");
     await writeFile(filePath, "alpha beta gamma");
     const before = await stat(filePath);
@@ -99,7 +99,7 @@ test("bash cancellation stops the shell and its child commands", { skip: process
             if (event.filename === "ready") return;
         }
     })();
-    const state: State = { messages: [], turnCount: 0, readFileHashes: new Map() };
+    const state: State = { messages: [], loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     const pending = TOOL_HANDLERS.bash({
         commands: `trap '' TERM; (sleep 0.2; printf leaked > '${leakedPath}') & printf ready > '${readyPath}'; wait`,
     }, state, controller.signal);
@@ -114,7 +114,7 @@ test("bash cancellation stops the shell and its child commands", { skip: process
 });
 
 test("bash preserves stdout and reports command failures", async () => {
-    const state: State = { messages: [], turnCount: 0, readFileHashes: new Map() };
+    const state: State = { messages: [], loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     assert.equal(await TOOL_HANDLERS.bash({ commands: "printf hello" }, state), "hello");
     await assert.rejects(Promise.resolve(TOOL_HANDLERS.bash({ commands: "printf failure >&2; exit 7" }, state)), /failed \(7\): failure/);
 });
@@ -124,7 +124,7 @@ for (const name of ["bash", "read_file", "write_file", "edit_file"] as const) {
         const filePath = await createFile(t, "original");
         const controller = new AbortController();
         controller.abort("user-cancel");
-        const state: State = { messages: [], turnCount: 0, readFileHashes: new Map() };
+        const state: State = { messages: [], loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
         await assert.rejects(Promise.resolve(TOOL_HANDLERS[name]({
             filePath, commands: `printf changed > '${filePath}'`, content: "changed", oldText: "original", newText: "changed",
         }, state, controller.signal)), error => error === "user-cancel");
@@ -136,7 +136,7 @@ for (const name of ["bash", "read_file", "write_file", "edit_file"] as const) {
 for (const name of ["read_file", "write_file", "edit_file"] as const) {
     test(`${name} cancels an active file operation`, async (t) => {
         const filePath = await createFile(t, "original");
-        const state: State = { messages: [], turnCount: 0, readFileHashes: new Map() };
+        const state: State = { messages: [], loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
         await TOOL_HANDLERS.read_file({ filePath }, state);
         const previousHash = state.readFileHashes.get(filePath);
         const controller = new AbortController();

@@ -13,6 +13,26 @@ import {
     type UserMessage,
 } from "./llm.ts";
 
+const openAIUsage: Responses.ResponseUsage = {
+    input_tokens: 20,
+    output_tokens: 5,
+    total_tokens: 25,
+    input_tokens_details: { cached_tokens: 8, cache_write_tokens: 0 },
+    output_tokens_details: { reasoning_tokens: 0 },
+};
+
+const anthropicUsage: AnthropicMessage["usage"] = {
+    input_tokens: 12,
+    output_tokens: 5,
+    cache_read_input_tokens: 8,
+    cache_creation_input_tokens: 3,
+    cache_creation: null,
+    inference_geo: null,
+    output_tokens_details: null,
+    server_tool_use: null,
+    service_tier: null,
+};
+
 const reasoningItem: Responses.ResponseReasoningItem = {
     id: "rs_1",
     type: "reasoning",
@@ -46,6 +66,7 @@ const userMessage: UserMessage = {
 
 const openAIAssistantMessage: AssistantMessage = {
     role: "assistant",
+    usage: { input_tokens: 20, output_tokens: 5, cache_read_tokens: 8 },
     content: [
         {
             type: "thinking",
@@ -90,8 +111,9 @@ test("canonical Agent messages become OpenAI Responses input items", () => {
 });
 
 test("a fake Responses API result becomes one canonical assistant Message", () => {
-    assert.deepEqual(responseOutputToMessage(providerOutput), {
+    assert.deepEqual(responseOutputToMessage(providerOutput, openAIUsage), {
         role: "assistant",
+        usage: { input_tokens: 20, output_tokens: 5, cache_read_tokens: 8 },
         content: [
             {
                 type: "thinking",
@@ -116,6 +138,7 @@ test("Anthropic history keeps thinking and groups tool results as a user message
         userMessage,
         {
             role: "assistant",
+            usage: { input_tokens: 12, output_tokens: 5, cache_read_tokens: 8 },
             content: [
                 {
                     type: "thinking",
@@ -153,7 +176,8 @@ test("Anthropic history keeps thinking and groups tool results as a user message
 });
 
 test("an Anthropic response becomes one canonical assistant Message", () => {
-    const response: Pick<AnthropicMessage, "content"> = {
+    const response: Pick<AnthropicMessage, "content" | "usage"> = {
+        usage: anthropicUsage,
         content: [
             { type: "thinking", thinking: "Inspect the directory.", signature: "sig_1" },
             { type: "redacted_thinking", data: "opaque-data" },
@@ -164,6 +188,7 @@ test("an Anthropic response becomes one canonical assistant Message", () => {
 
     assert.deepEqual(anthropicMessageToMessage(response), {
         role: "assistant",
+        usage: { input_tokens: 12, output_tokens: 5, cache_read_tokens: 8 },
         content: [
             {
                 type: "thinking",
@@ -210,7 +235,7 @@ test("OpenAI tool calls keep invalid arguments and valid calls in the same respo
 test("Anthropic tool calls keep input values other than objects in the history", () => {
     for (const input of [[], null, "pwd", 42, true]) {
         const block = { type: "tool_use" as const, id: "call_invalid", name: "bash", input, caller: { type: "direct" as const } };
-        const message = anthropicMessageToMessage({ content: [block] });
+        const message = anthropicMessageToMessage({ content: [block], usage: anthropicUsage });
         const call = message.content[0];
         assert.ok(call?.type === "toolCall" && "argumentError" in call);
         assert.equal(call.id, block.id);

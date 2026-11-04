@@ -1,7 +1,7 @@
 import { permissionCheck, type Finding } from "./permission.ts";
 import { TOOL_DEFINITIONS, TOOL_HANDLERS } from "./tools.ts";
-import { applyPreToolUse, applyPostToolUse, applyStop } from "./hooks.ts";
-import { llmStream, type AssistantMessage, type InvalidToolCall, type Message, type ModelConfig, type ToolCall } from "./llm.ts";
+import { applyPreToolUse, applyPostToolUse, applyStop, applyModelResponse } from "./hooks.ts";
+import { llmStream, type AssistantMessage, type InvalidToolCall, type Message, type ModelConfig, type ToolCall, type Usage } from "./llm.ts";
 
 const MODEL: ModelConfig = {
     api: "anthropic-messages",
@@ -10,8 +10,9 @@ const MODEL: ModelConfig = {
 
 export type State = {
     messages: Message[],
-    turnCount: number,
-    readFileHashes: Map<string, string>
+    readFileHashes: Map<string, string>,
+    loopCount: number,
+    usage: Usage, // Token totals for this state. Each new user prompt uses the same state.
 }
 
 type AgentLoopResult = 
@@ -27,7 +28,7 @@ type AgentLoopResult =
 export async function agentLoop(state: State, signal?: AbortSignal): Promise<AgentLoopResult> {
     let messages = state.messages;
     while (true) {
-        state.turnCount++;
+        state.loopCount++;
         // After a cancellation, do not start another model request.
         if (signal?.aborted) return { stop_reason: "cancelled" };
         let response: AssistantMessage;
@@ -39,6 +40,8 @@ export async function agentLoop(state: State, signal?: AbortSignal): Promise<Age
                 tools: TOOL_DEFINITIONS,
                 signal,
             });
+            // Record usage before the cancellation check can discard the response.
+            await applyModelResponse(response, state);
         } catch (e) {
             if (signal?.aborted) return { stop_reason: "cancelled" };
             return {error: e, stop_reason: "model_error"};
@@ -47,6 +50,7 @@ export async function agentLoop(state: State, signal?: AbortSignal): Promise<Age
         if (signal?.aborted) return { stop_reason: "cancelled" };
         // Keep the response before its tool results in the message history.
         messages.push(response);
+
         const toolCalls = response.content.filter((item): item is ToolCall | InvalidToolCall => item.type === "toolCall");
         if (toolCalls.length > 0) {
             // Run the tool calls in the order of the response.
@@ -89,7 +93,7 @@ export async function agentLoop(state: State, signal?: AbortSignal): Promise<Age
             // The next model request includes all tool results from this response.
         } else {
             // The loop stops normally only for a response without tool calls.
-            await applyStop(response);
+            await applyStop(response, state);
             return {message: response, stop_reason: "completed"};
         }
     }
@@ -107,4 +111,13 @@ async function runTool(call: ToolCall, state: State, signal?: AbortSignal): Prom
         output = String(error);
     }
     return output;
+}
+
+/** Print the current token totals and loop count. */
+export async function summaryTurn(response: AssistantMessage, state: State) {
+    console.log(`
+    input tokens: ${state.usage.input_tokens}
+    output tokens: ${state.usage.output_tokens}
+    cache read tokens: ${state.usage.cache_read_tokens}
+    loop count: ${state.loopCount}`)
 }

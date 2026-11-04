@@ -1,7 +1,8 @@
 import { getReadInterface } from "./input.ts";
-import { applyUserPromptSubmit } from "./hooks.ts";
+import { applyUserPromptSubmit, onModelResponse, onStop } from "./hooks.ts";
 import type { Message } from "./llm.ts";
-import { agentLoop, type State } from "./agent.ts"
+import { agentLoop, summaryTurn, type State } from "./agent.ts"
+import { countTokenUsage } from "./usage.ts";
 
 export const ReadInterface = getReadInterface();
 /**
@@ -10,7 +11,10 @@ export const ReadInterface = getReadInterface();
 async function main() {
     let query = "";
     const history: Message[] = [];
-    const state: State = {messages: history, turnCount: 0, readFileHashes: new Map<string, string>()}
+    const state: State = {messages: history, loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 }}
+    // Register hooks once before the input loop to prevent duplicate handlers.
+    onModelResponse(countTokenUsage);
+    onStop(summaryTurn);
     let activeController: AbortController | undefined;
     const cancel = () => {
         if (activeController) {

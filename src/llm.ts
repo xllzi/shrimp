@@ -54,9 +54,16 @@ export interface UserMessage {
     content: TextContent[];
 }
 
+export interface Usage {
+    input_tokens: number,
+    output_tokens: number,
+    cache_read_tokens: number,
+}
+
 export interface AssistantMessage {
     role: "assistant";
     content: (TextContent | RefusalContent | ThinkingContent | RedactedThinkingContent | ToolCall | InvalidToolCall)[];
+    usage: Usage; // Usage for the model request that produced this message.
 }
 
 export interface ToolResultMessage {
@@ -91,6 +98,7 @@ function parseToolCall(call: Omit<ToolCall, "arguments">, argumentsJson: string)
 
 export function responseOutputToMessage(
     output: Responses.ResponseOutputItem[],
+    responseUsage?: Responses.ResponseUsage | null,
 ): AssistantMessage {
     const content: AssistantMessage["content"] = [];
 
@@ -124,7 +132,13 @@ export function responseOutputToMessage(
         }
     }
 
-    return { role: "assistant", content };
+    // Use zero when the response does not include usage data.
+    const usage: Usage = {
+        input_tokens: responseUsage?.input_tokens ?? 0,
+        output_tokens: responseUsage?.output_tokens ?? 0,
+        cache_read_tokens: responseUsage?.input_tokens_details.cached_tokens ?? 0,
+    };
+    return { role: "assistant", content, usage };
 }
 
 export function messageToResponseInput(message: Message): Responses.ResponseInputItem[] {
@@ -215,7 +229,7 @@ const openAIResponsesAdapter: LlmAdapter = async (request) => {
         } else if (event.type === "error") {
             throw new Error(event.message);
         } else if (event.type === "response.completed") {
-            return responseOutputToMessage(event.response.output);
+            return responseOutputToMessage(event.response.output, event.response.usage);
         }
     }
     throw new Error("Stream ended without a completed response");
@@ -276,7 +290,7 @@ export function messageToAnthropicMessages(messages: Message[]): MessageParam[] 
 }
 
 export function anthropicMessageToMessage(
-    response: Pick<AnthropicMessage, "content">,
+    response: Pick<AnthropicMessage, "content" | "usage">,
 ): AssistantMessage {
     const content: AssistantMessage["content"] = [];
     for (const block of response.content) {
@@ -299,7 +313,13 @@ export function anthropicMessageToMessage(
             }, JSON.stringify(block.input)));
         }
     }
-    return { role: "assistant", content };
+    // Keep cache reads separate from cache creation.
+    const usage: Usage = {
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+        cache_read_tokens: response.usage.cache_read_input_tokens ?? 0,
+    };
+    return { role: "assistant", content, usage };
 }
 
 const anthropicMessagesAdapter: LlmAdapter = async (request) => {

@@ -1,4 +1,5 @@
 import type { AssistantMessage, Message, ToolCall } from "./llm.ts";
+import type { State } from "./agent.ts";
 
 /** Loop state a prompt handler can see. */
 export type UserPromptCtx = {
@@ -9,12 +10,17 @@ export type UserPromptCtx = {
 // --- registries: one per point, each with its own contract ------------
 
 const userPromptHooks: Array<(ctx: UserPromptCtx) => string | Promise<string>> = [];
+const modelResponseHooks: Array<(response: AssistantMessage, state: State) => void | Promise<void>> = []
 const preToolHooks: Array<(call: ToolCall) => ToolCall | Promise<ToolCall>> = [];
 const postToolHooks: Array<(call: ToolCall, output: string) => string | Promise<string>> = [];
-const stopHooks: Array<(response: AssistantMessage) => void | Promise<void>> = [];
+const stopHooks: Array<(response: AssistantMessage, state: State) => void | Promise<void>> = [];
 
 export function onUserPromptSubmit(fn: (ctx: UserPromptCtx) => string | Promise<string>) {
     userPromptHooks.push(fn);
+}
+
+export function onModelResponse(fn: (response: AssistantMessage, state: State) => void | Promise<void>) {
+    modelResponseHooks.push(fn);
 }
 
 export function onPreToolUse(fn: (call: ToolCall) => ToolCall | Promise<ToolCall>) {
@@ -25,13 +31,14 @@ export function onPostToolUse(fn: (call: ToolCall, output: string) => string | P
     postToolHooks.push(fn);
 }
 
-export function onStop(fn: (response: AssistantMessage) => void | Promise<void>) {
+export function onStop(fn: (response: AssistantMessage, state: State) => void | Promise<void>) {
     stopHooks.push(fn);
 }
 
+
 // --- dispatch: one function per point ---------------------------------
 // Chain points pass value through every handler in registration order.
-// All four points are fail-open: a throwing hook is logged and skipped 
+// If a hook fails, log the error and continue with the next hook.
 
 export async function applyUserPromptSubmit(ctx: UserPromptCtx): Promise<string> {
     let query = ctx.query;
@@ -43,6 +50,17 @@ export async function applyUserPromptSubmit(ctx: UserPromptCtx): Promise<string>
         }
     }
     return query;
+}
+
+/** Run hooks in registration order. Each hook receives the same state object. */
+export async function applyModelResponse(response: AssistantMessage, state: State): Promise<void> {
+    for (const hook of modelResponseHooks) {
+        try {
+            await hook(response, state);
+        } catch (err) {
+            console.error(`[hook modelResponse] ${err}`);
+        }
+    }
 }
 
 export async function applyPreToolUse(call: ToolCall): Promise<ToolCall> {
@@ -67,10 +85,11 @@ export async function applyPostToolUse(call: ToolCall, output: string): Promise<
     return output;
 }
 
-export async function applyStop(response: AssistantMessage): Promise<void> {
+/** Run hooks after the final response. Wait for each hook to finish. */
+export async function applyStop(response: AssistantMessage, state: State): Promise<void> {
     for (const hook of stopHooks) {
         try {
-            await hook(response);
+            await hook(response, state);
         } catch (err) {
             console.error(`[hook Stop] ${err}`);
         }
