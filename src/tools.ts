@@ -197,7 +197,7 @@ async function runEditFile(args: unknown, state: State, signal?: AbortSignal): P
         }
         const text = await readFile(filePath, { encoding: 'utf8', signal });
         signal?.throwIfAborted();
-        const hash = createHash("sha256").update(text, "utf-8").digest("hex");
+        let hash = createHash("sha256").update(text, "utf-8").digest("hex");
         if (state.readFileHashes.get(filePath) != hash) {
             return "Error: file content changed. You need to read the file first before edit the file";
         }
@@ -212,9 +212,11 @@ async function runEditFile(args: unknown, state: State, signal?: AbortSignal): P
         // Insert the replacement text as literal content.
         const updatedText = text.slice(0, matchStart) + newText + text.slice(matchStart + oldText.length);
         await writeFile(filePath, updatedText, { signal });
+        hash = createHash("sha256").update(updatedText, "utf8").digest("hex");
+        state.readFileHashes.set(filePath, hash);
+        return "replace text successfully";
     } catch (err) {
         signal?.throwIfAborted();
         return String(err);
     }
-    return "replace file successfully";
 }

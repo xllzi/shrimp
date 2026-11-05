@@ -50,7 +50,7 @@ for (const scenario of [
 
         const output = await TOOL_HANDLERS.edit_file({ filePath, oldText: scenario.oldText, newText: scenario.newText }, state);
 
-        assert.equal(output, "replace file successfully");
+        assert.equal(output, "replace text successfully");
         assert.equal(await readFile(filePath, "utf8"), scenario.expected);
     });
 }
@@ -62,7 +62,7 @@ test("edit_file rejects an unread file without a file write", async (t) => {
 
     const output = await TOOL_HANDLERS.edit_file({ filePath, oldText: "beta", newText: "delta" }, state);
 
-    assert.match(output, /never read/);
+    assert.match(output, /File has not been read yet/);
     assert.equal(await readFile(filePath, "utf8"), "alpha beta");
     assert.equal((await stat(filePath)).mtimeMs, before.mtimeMs);
 });
@@ -80,7 +80,7 @@ test("edit_file rejects changed content until read_file refreshes the saved hash
     assert.equal((await stat(filePath)).mtimeMs, before.mtimeMs);
 
     assert.equal(await TOOL_HANDLERS.read_file({ filePath }, state), "alpha beta gamma");
-    assert.equal(await TOOL_HANDLERS.edit_file(args, state), "replace file successfully");
+    assert.equal(await TOOL_HANDLERS.edit_file(args, state), "replace text successfully");
     assert.equal(await readFile(filePath, "utf8"), "alpha delta gamma");
 });
 
