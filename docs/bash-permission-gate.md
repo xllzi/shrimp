@@ -1,86 +1,139 @@
-# Specification: Bash Permission Gate
+# Tool permissions and Bash rules
 
-## 1. Purpose
+## Purpose
 
-The agent runs shell commands through the `bash` tool. The gate inspects each command before the tool runs it.
+Shrimp checks permission before it runs a tool. The rules return `allow`, `ask`, or `deny`. The approval flow converts `ask` to the user's `allow` or `deny` decision.
 
-The gate returns one verdict: `allow`, `ask`, or `deny`. The tool runs the command only for `allow`. For `ask`, the user approves or rejects the call in the terminal. For `deny`, the tool never runs the command.
+The agent runs a tool only after an `allow` decision, while the turn is active. The tool handler then checks its arguments. See [Tool execution](tool-execution.md) for the full sequence.
 
-## 2. Design
+## Responsibilities
 
-The gate parses the command string with tree-sitter and the bash grammar. Both ship as wasm files in the packages `web-tree-sitter` and `tree-sitter-bash`.
+| Layer | Source | Responsibility |
+| --- | --- | --- |
+| Domain | [src/domain/permission.ts](../src/domain/permission.ts) | Defines the rules and returns a verdict. |
+| Application | [src/app/permission.ts](../src/app/permission.ts) | Requests approval for `ask` and checks cancellation. |
+| Adapter | [src/adapter/bash.ts](../src/adapter/bash.ts) | Parses Bash commands and extracts facts from the syntax tree. |
+| Adapter | [src/adapter/permission.ts](../src/adapter/permission.ts) | Shows the terminal prompt and reads the answer. |
+| Entry point | [src/main.ts](../src/main.ts) | Supplies the workspace, parser, and approval callback. |
 
-`src/adapter/bash.ts` walks the full syntax tree and extracts plain command, pipeline, and redirect facts. It does not make permission decisions.
+The domain rules use the supplied data. They do not prompt the user or read the process working directory.
 
-`src/domain/permission.ts` evaluates these facts and the supplied workspace against the permission rules. It returns `allow`, `ask`, or `deny` without prompting or reading process state.
+`parseBash` uses tree-sitter and the Bash grammar. The packages `web-tree-sitter` and `tree-sitter-bash` supply the WebAssembly files. The adapter returns plain command, pipeline, and redirect facts in a `BashSyntax` value. It does not decide permission.
 
-`src/app/permission.ts` creates a permission checker from a workspace, a parser, and an approval callback. It requests approval only for `ask`, propagates cancellation, and returns a final `allow` or `deny` decision.
+`main.ts` calls `createPermissionCheck({ workspace, parseBash, askPermission })`. It sets `workspace` to `process.cwd()` when it starts the session. It passes the resulting function to `agentLoop(state, permissionCheck, signal)`.
 
-`src/adapter/permission.ts` implements the terminal approval callback. `src/main.ts` supplies the concrete adapters and passes the checker to `agentLoop(state, permissionCheck, signal)`.
+## Verdicts and decisions
 
-File-write rules resolve relative paths against the supplied workspace and ask before writes outside it. This is a lexical path check; it does not resolve symbolic links.
+| Rule verdict | Rank | Effect |
+| --- | --- | --- |
+| `allow` | 0 | The approval flow returns `allow` without a prompt. |
+| `ask` | 1 | The approval flow requests a user decision. |
+| `deny` | 2 | The approval flow returns `deny` without a prompt. |
 
-## 3. Verdicts
+`evaluatePermission` checks the rules for the tool name. It returns the highest-ranked verdict. If ranks are equal, it keeps the first finding. If no rule produces a finding, it returns `allow`.
 
-| Verdict | Rank | Meaning |
-|---|---|---|
-| `allow` | 0 | No finding. The tool runs the command. |
-| `ask` | 1 | Risky or opaque. The user decides. |
-| `deny` | 2 | Dangerous. The tool never runs the command. |
+For Bash, `bashVerdict` checks all extracted facts. It selects the highest rank and combines the finding messages. Thus, a `deny` finding takes priority over an `ask` finding. If Bash has no finding, `bashVerdict` returns `null`.
 
-One command can produce several findings. The gate returns the finding with the highest rank.
+An `allow` verdict means that the current rules did not block the call. It does not prove that the call is safe.
 
-## 4. Rules
+## Approval and cancellation
 
-### 4.1 Deny
+The application parses the command only for a `bash` call. It then calls `evaluatePermission` with the tool call, workspace, and any Bash facts.
+
+For an `ask` verdict, the terminal adapter shows the tool name and arguments. It displays this prompt:
+
+```text
+Approve this tool call? [y/n]
+```
+
+To approve the call, enter `y`. To reject the call, enter `n`. For any other answer, the adapter displays `input y or n` and repeats the prompt.
+
+The application returns the decision with the rule message. It appends `user allow` or `user deny` on a new line. The terminal adapter does not evaluate the rules.
+
+The application checks the `AbortSignal` before it evaluates permission and before and after it requests approval. The terminal adapter also passes the signal to its input reader.
+
+If the user presses `Ctrl+C` during approval, the agent cancels the turn. It does not run the tool. An approval error propagates to the caller instead of granting permission.
+
+## File rules
+
+The file rule applies to `write_file` and `edit_file`. It resolves `filePath` against the supplied workspace, then checks the resulting path.
+
+| Path result | Verdict |
+| --- | --- |
+| Inside the workspace, or equal to it | `allow` |
+| Outside the workspace | `ask` |
+
+For a workspace of `/project`, `src/a.ts` resolves to `/project/src/a.ts` and is inside the workspace. The path `../outside/a.ts` is outside it. The path `/project-other/a.ts` is also outside it.
+
+This rule compares paths without resolving symbolic links. It does not check file access through Bash commands. `read_file` has no permission rule.
+
+## Bash rules
+
+### Deny
+
+A Bash finding has the `deny` verdict when one of these conditions applies:
 
 - The command name is `sudo`, `su`, or `doas`.
-- The command name is `shutdown`, `reboot`, `halt`, or `poweroff`. `systemctl` with one of these words as an argument matches too.
-- The command name starts with `mkfs`, or is `fdisk`, `sfdisk`, `cfdisk`, `parted`, `wipefs`, or `blockdev`.
-- `dd` has an argument `of=/dev/<name>`, and `<name>` is not a safe device.
-- `rm` has a recursive flag, and one target is a system root (see section 5).
+- The command name is `shutdown`, `reboot`, `halt`, or `poweroff`.
+- The command is `systemctl` with one of those four names as an argument.
+- The command name starts with `mkfs`.
+- The command name is `fdisk`, `sfdisk`, `cfdisk`, `parted`, `wipefs`, or `blockdev`.
+- The command is `dd` with an `of=/dev/<name>` argument that does not refer to a safe device.
+- The command is `rm` with a recursive flag and a system root target.
 - A redirect destination starts with `/dev/` and is not a safe device.
 
 The safe devices are `/dev/null`, `/dev/stdout`, `/dev/stderr`, and `/dev/tty`.
 
-### 4.2 Ask
+### Ask
 
-- `rm` has a recursive flag and no system root target. Example: `rm -rf build`.
-- A pipeline sends the output of `curl` or `wget` into a shell interpreter. The interpreters are `sh`, `bash`, `zsh`, `dash`, `ash`, and `ksh`.
-- The command is `eval`, or a shell interpreter with a `-c` flag. The parser cannot inspect the string.
-- The tree has a parse error (`rootNode.hasError` is true).
+A Bash finding has the `ask` verdict when one of these conditions applies:
 
-### 4.3 Allow
+- The command is `rm` with a recursive flag and no system root target. Example: `rm -rf build`.
+- A pipeline contains `curl` or `wget`, followed by a shell interpreter.
+- The command is `eval`.
+- The command is a shell interpreter with a `-c` flag.
+- The parser returns no syntax tree.
+- The syntax tree has a parse error (`rootNode.hasError` is true).
 
-Every command with no finding. Examples: `ls -la`, `echo hi > /dev/null`, `rm file.txt`.
+The shell interpreters are `sh`, `bash`, `zsh`, `dash`, `ash`, and `ksh`. The gate cannot inspect the command string supplied to `eval` or `bash -c`.
 
-## 5. Matching rules
+### No finding
 
-The gate strips quotes before it matches. `"$HOME"` becomes `$HOME`.
+Commands with no finding receive `allow` from `evaluatePermission`. Examples are `ls -la`, `echo hi > /dev/null`, and `rm file.txt`.
 
-A word that starts with one or two hyphens is a flag. The other words are arguments.
+## Bash matching
 
-For `rm`, the recursive test does two checks. It scans each short flag cluster for the letter `r` or `R`. It also accepts the long flag `--recursive`. So `-rf`, `-fr`, and `-r -f` all match.
+The parser removes matching outer quotes from argument words and redirect destinations. For example, `"$HOME"` becomes `$HOME`. It does not expand variables.
 
-The system root set is `/`, `/*`, `~`, `~/*`, `$HOME`, `$HOME/*`, `${HOME}`, and `${HOME}/*`. The gate ignores trailing slashes.
+The rules use `/^-{1,2}[^-]/` to identify flags. Other words are arguments.
 
-The gate skips `variable_assignment` nodes. `FOO=1 rm -rf /` matches the `rm` rule.
+For `rm`, a short flag group that contains `r` or `R` is recursive. The long flag `--recursive` also matches. Thus, `-rf`, `-fr`, and `-r -f` all match.
 
-## 6. Wrapper commands
+The system root targets are `/`, `/*`, `~`, `~/*`, `$HOME`, `$HOME/*`, `${HOME}`, and `${HOME}/*`. The rule removes trailing slashes before it compares the target.
 
-The wrappers are `env`, `nohup`, `nice`, `stdbuf`, `xargs`, and `command`. A wrapper can hide the real command in its arguments.
+The parser skips `variable_assignment` nodes when it collects command arguments. Thus, `FOO=1 rm -rf /` still matches the `rm` rule.
 
-For a wrapper, the gate drops `NAME=value` words and flags. It takes the first remaining word as the command name and re-runs the rules. Example: `env FOO=1 mkfs.ext4 /dev/sdb` matches the `mkfs` rule.
+## Wrapper commands
 
-## 7. Tree coverage
+The wrapper commands are `env`, `nohup`, `nice`, `stdbuf`, `xargs`, and `command`. Their arguments can contain another command.
 
-The walk visits every node in the tree. Loops, subshells, command substitutions, and pipelines contain `command` nodes. The rules apply to each node. Example: `echo $(sudo reboot)` returns `deny`.
+The rules first check the wrapper itself. If it produces no finding, they remove `NAME=value` words. They select the first remaining word that is not a flag as the inner command name.
 
-## 8. Limitations
+The rules check that name with the words that follow it. For example, `env FOO=1 mkfs.ext4 /dev/sdb` matches the `mkfs` rule. This check does not recursively examine further wrapper commands.
 
-The gate does not track data flow. It has these blind spots:
+## Tree coverage and limits
 
-- The content of a string after `bash -c` or `eval`. The gate returns `ask` for these commands.
-- Data that a pipeline decodes or expands at run time. The gate does not decode data.
-- Commands that build a command from their arguments, such as `find -exec`. The gate sees only the words.
+The parser visits all named nodes in the syntax tree. This includes commands in loops, subshells, command substitutions, and pipelines. For example, `echo $(sudo reboot)` returns `deny`.
 
+The gate does not track data flow. Its limits include:
+
+- Command strings supplied to `bash -c` or `eval`. These calls produce an `ask` finding.
+- Data that a pipeline decodes or expands at run time. The gate does not decode that data.
+- Commands such as `find -exec` that use their arguments to run another command. The gate sees the words but does not inspect that execution.
+
+## Tests
+
+- [Domain tests](../src/domain/permission.test.ts) check verdict priority, missing syntax, and workspace paths.
+- [Application tests](../src/app/permission.test.ts) check approval decisions, cancellation, and approval errors.
+- [Parser tests](../src/adapter/bash.test.ts) check Bash rules with command strings and nested syntax.
+- [CLI tests](../src/main.test.ts) check cancellation during requests, tool execution, and approval.

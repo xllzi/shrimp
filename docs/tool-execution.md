@@ -11,12 +11,15 @@ Shrimp gives the model four tools. The model requests a tool call. The agent run
 
 ## From tool call to result
 
-1. The model adapter parses the arguments and checks that they form a JSON object. If this check fails, the agent records the error as the result without running hooks or permission checks.
-2. The agent processes calls in the order in which they appear in the model response. If the arguments form a JSON object, it runs the `PreToolUse` hook and checks permission on the resulting call.
-3. If the permission check returns `allow`, `runTool` selects the handler from `TOOL_HANDLERS`. Each handler validates its arguments. If validation fails, the handler returns an error. If the permission check returns `deny`, the agent uses the denial message as the result.
-4. If the turn is active, the `PostToolUse` hook can change the result. The agent records the result with the tool call ID. The next model request includes the results in its message history.
+1. The model adapter parses the arguments and checks that they form a JSON object. If this check fails, the agent records the error as the result. It does not run hooks or permission checks for that call.
+2. The agent processes calls in their order in the model response. For a call with object arguments, it runs the `PreToolUse` hook. It checks permission on the resulting call.
+3. If a rule returns `ask`, the approval flow waits for the user's decision. It returns `allow` or `deny` to the agent.
+4. If permission is `allow` and the turn is active, `runTool` selects a handler from `TOOL_HANDLERS`. The handler checks its arguments. If they are invalid, it returns an error. If permission is `deny`, the agent skips execution and uses the denial message as the result.
+5. If the turn is active, the `PostToolUse` hook can change the result. The agent records the result with the tool call ID. The next model request includes the results in its message history.
 
-The [Bash permission gate](bash-permission-gate.md) checks `bash` commands. The file permission rule checks `write_file` and `edit_file` paths against the current working directory. It can ask for approval. It compares path strings, so a relative path can also trigger the prompt. `read_file` has no permission rule.
+The [permission rules](bash-permission-gate.md) check Bash commands and paths for `write_file` and `edit_file`. The CLI supplies its working directory as the workspace when it starts the session. The file rule resolves relative paths against that workspace and requests approval for paths outside it.
+
+The file rule does not resolve symbolic links or check file access through Bash. `read_file` has no permission rule.
 
 ## Bash execution
 
@@ -62,4 +65,11 @@ The file handlers pass the `AbortSignal` to the file API. Cancellation can inter
 
 The agent records a cancellation result for the interrupted call. It also records a result for each remaining call without starting that call or sending another model request.
 
-Source files are [agent.ts](../src/agent.ts), [tools.ts](../src/tools.ts), [permission.ts](../src/permission.ts), and [main.ts](../src/main.ts).
+Source files:
+
+- [Agent loop](../src/app/agent.ts)
+- [Tool handlers](../src/app/tools.ts)
+- [Permission rules](../src/domain/permission.ts)
+- [Approval flow](../src/app/permission.ts)
+- [Terminal approval](../src/adapter/permission.ts)
+- [Entry point](../src/main.ts)
