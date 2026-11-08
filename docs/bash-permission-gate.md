@@ -10,7 +10,15 @@ The gate returns one verdict: `allow`, `ask`, or `deny`. The tool runs the comma
 
 The gate parses the command string with tree-sitter and the bash grammar. Both ship as wasm files in the packages `web-tree-sitter` and `tree-sitter-bash`.
 
-The parser produces a syntax tree. The gate walks the full tree and applies rules to three node types: `command`, `pipeline`, and `file_redirect`.
+`src/adapter/bash.ts` walks the full syntax tree and extracts plain command, pipeline, and redirect facts. It does not make permission decisions.
+
+`src/domain/permission.ts` evaluates these facts and the supplied workspace against the permission rules. It returns `allow`, `ask`, or `deny` without prompting or reading process state.
+
+`src/app/permission.ts` creates a permission checker from a workspace, a parser, and an approval callback. It requests approval only for `ask`, propagates cancellation, and returns a final `allow` or `deny` decision.
+
+`src/adapter/permission.ts` implements the terminal approval callback. `src/main.ts` supplies the concrete adapters and passes the checker to `agentLoop(state, permissionCheck, signal)`.
+
+File-write rules resolve relative paths against the supplied workspace and ask before writes outside it. This is a lexical path check; it does not resolve symbolic links.
 
 ## 3. Verdicts
 

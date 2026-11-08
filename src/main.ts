@@ -1,14 +1,18 @@
-import { getReadInterface } from "./input.ts";
-import { applyUserPromptSubmit, onModelResponse, onStop } from "./hooks.ts";
-import type { Message } from "./llm.ts";
-import { agentLoop, summaryTurn, type State } from "./agent.ts"
-import { countTokenUsage } from "./usage.ts";
+import { parseBash } from "./adapter/bash.ts";
+import { askPermission } from "./adapter/permission.ts";
+import { createPermissionCheck } from "./app/permission.ts";
+import { agentLoop } from "./app/agent.ts";
+import { getReadInterface } from "./adapter/input.ts";
+import { countTokenUsage, summaryTurn } from "./app/usage.ts";
+import type { Message, State } from "./domain/agent.ts";
+import { applyUserPromptSubmit, onModelResponse, onStop } from "./app/hooks.ts";
 
 export const ReadInterface = getReadInterface();
 /**
  * main entry point
  */
 async function main() {
+    const permissionCheck = createPermissionCheck({ workspace: process.cwd(), parseBash, askPermission });
     let query = "";
     const history: Message[] = [];
     const state: State = {messages: history, loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 }}
@@ -38,7 +42,7 @@ async function main() {
             const controller = new AbortController();
             activeController = controller;
             try {
-                const response = await agentLoop(state, controller.signal);
+                const response = await agentLoop(state, permissionCheck, controller.signal);
                 if (response.stop_reason === "model_error") {
                     console.error(response.error);
                 } else if (response.stop_reason === "cancelled") {

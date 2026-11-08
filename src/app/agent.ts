@@ -1,19 +1,15 @@
-import { permissionCheck, type Finding } from "./permission.ts";
-import { TOOL_DEFINITIONS, TOOL_HANDLERS } from "./tools.ts";
-import { applyPreToolUse, applyPostToolUse, applyStop, applyModelResponse } from "./hooks.ts";
-import { llmStream, type AssistantMessage, type InvalidToolCall, type Message, type ModelConfig, type ToolCall, type Usage } from "./llm.ts";
+import { type ModelConfig, llmStream } from "../adapter/llm.ts";
+import type { AssistantMessage, InvalidToolCall, State, ToolCall } from "../domain/agent.ts";
+import { applyModelResponse, applyPostToolUse, applyPreToolUse, applyStop } from "./hooks.ts";
+import type { Finding } from "../domain/permission.ts";
+import { TOOL_DEFINITIONS } from "../domain/tools.ts";
+import type { PermissionCheck } from "./permission.ts";
+import { runTool } from "./tools.ts";
 
 const MODEL: ModelConfig = {
     api: "anthropic-messages",
     model: "deepseek-flash",
 };
-
-export type State = {
-    messages: Message[],
-    readFileHashes: Map<string, string>,
-    loopCount: number,
-    usage: Usage, // Token totals for this state. Each new user prompt uses the same state.
-}
 
 type AgentLoopResult = 
     | { message: AssistantMessage, stop_reason: "completed"}
@@ -25,7 +21,7 @@ type AgentLoopResult =
  * Append each response and tool result to `messages` in place.
  * Return a separate result for a model error or a user cancellation.
  */
-export async function agentLoop(state: State, signal?: AbortSignal): Promise<AgentLoopResult> {
+export async function agentLoop(state: State, permissionCheck: PermissionCheck, signal?: AbortSignal): Promise<AgentLoopResult> {
     let messages = state.messages;
     while (true) {
         state.loopCount++;
@@ -99,25 +95,4 @@ export async function agentLoop(state: State, signal?: AbortSignal): Promise<Age
     }
 }
 
-async function runTool(call: ToolCall, state: State, signal?: AbortSignal): Promise<string> {
-    let output: string;
-    // dispatch function and executed
-    let fn = TOOL_HANDLERS[call.name];
-    try {
-        signal?.throwIfAborted();
-        output = await fn(call.arguments, state, signal);
-    } catch (error) {
-        signal?.throwIfAborted();
-        output = String(error);
-    }
-    return output;
-}
 
-/** Print the current token totals and loop count. */
-export async function summaryTurn(response: AssistantMessage, state: State) {
-    console.log(`
-    input tokens: ${state.usage.input_tokens}
-    output tokens: ${state.usage.output_tokens}
-    cache read tokens: ${state.usage.cache_read_tokens}
-    loop count: ${state.loopCount}`)
-}

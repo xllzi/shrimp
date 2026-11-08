@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bashVerdict } from "./permission.ts";
+import { bashVerdict as evaluateBash } from "../domain/permission.ts";
+import { parseBash } from "./bash.ts";
+
+const bashVerdict = (commands: string) => evaluateBash(parseBash(commands));
 
 test("allows an ordinary command", () => {
     assert.equal(bashVerdict("pwd"), null);
@@ -32,4 +35,15 @@ test("denies privilege escalation", () => {
         permission: "deny",
         message: "`sudo` elevates privileges",
     });
+});
+
+test("parser preserves nested commands, wrappers, redirects and quoted roots", () => {
+    for (const commands of [
+        "echo $(sudo reboot)", "env FOO=1 mkfs.ext4 /dev/sdb",
+        "echo hi > /dev/sda", "rm -rf '$HOME'", "for file in a b; do sudo ls; done",
+    ]) {
+        assert.equal(bashVerdict(commands)?.permission, "deny", commands);
+    }
+    assert.equal(bashVerdict("echo hi > /dev/null"), null);
+    assert.equal(bashVerdict("if true; then")?.permission, "ask");
 });

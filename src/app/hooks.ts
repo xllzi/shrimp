@@ -1,5 +1,4 @@
-import type { AssistantMessage, Message, ToolCall } from "./llm.ts";
-import type { State } from "./agent.ts";
+import type { AssistantMessage, Message, State, ToolCall } from "../domain/agent.ts";
 
 /** Loop state a prompt handler can see. */
 export type UserPromptCtx = {

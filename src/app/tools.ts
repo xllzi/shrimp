@@ -1,75 +1,9 @@
 import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
-import { z } from "zod";
-import type { State } from "./agent.ts";
 import { createHash } from "node:crypto";
-
-// These schemas define the tool parameters and check arguments before execution.
-const BashSchema = z.object({
-    commands: z.string(),
-})
-
-const ReadFileSchema = z.object({
-    filePath: z.string(),
-})
-
-const WriteFileSchema = z.object({
-    filePath: z.string(),
-    content: z.string(),
-})
-
-const EditFileSchema = z.object({
-    filePath: z.string(),
-    oldText: z.string().min(1, "'oldText' must not be empty."),
-    newText: z.string(),
-})
-
-const ToolArgumentsSchema = z.record(z.string(), z.unknown());
-
-export interface ToolDefinition {
-    name: string;
-    description: string;
-    parameters: { type: "object"; [key: string]: unknown };
-}
-
-/**
- * Parse the JSON arguments from the provider. Reject values other than objects.
- * The message converter catches parse errors and keeps the call for an error result.
- */
-export function parseToolArguments(name: string, argumentsJson: string): Record<string, unknown> {
-    let json: unknown;
-    try {
-        json = JSON.parse(argumentsJson);
-    } catch (error) {
-        throw new Error(`Invalid JSON arguments for ${name}: ${String(error)}`);
-    }
-
-    const parsed = ToolArgumentsSchema.safeParse(json);
-    if (!parsed.success) {
-        throw new Error(`Invalid arguments for ${name}: ${z.prettifyError(parsed.error)}`);
-    }
-    return parsed.data;
-}
-
-// The model uses these definitions to select tools and supply arguments.
-export const TOOL_DEFINITIONS: ToolDefinition[] = [
-    { name: "bash", 
-      description: "run bash commands", 
-      parameters: z.toJSONSchema(BashSchema) as ToolDefinition["parameters"] 
-    },
-    { name: "read_file", 
-      description: "read a file's content",
-      parameters: z.toJSONSchema(ReadFileSchema) as ToolDefinition["parameters"] 
-    },
-    { name: "write_file", 
-      description: "write content to a file",
-      parameters: z.toJSONSchema(WriteFileSchema) as ToolDefinition["parameters"] 
-    },
-    { name: "edit_file",
-      description: "Replace text in a file. The 'oldText' value must match exactly once.",
-      parameters: z.toJSONSchema(EditFileSchema) as ToolDefinition["parameters"] 
-    },
-];
+import { readFile, writeFile } from "node:fs/promises";
+import z from "zod";
+import type { State, ToolCall } from "../domain/agent.ts";
+import { BashSchema, EditFileSchema, ReadFileSchema, WriteFileSchema } from "../domain/tools.ts";
 
 export type ToolFn = (args: unknown, state: State, signal?: AbortSignal) => string | Promise<string>;
 // The agent uses the tool name to select a function from this table.
@@ -80,7 +14,22 @@ export const TOOL_HANDLERS: Record<string, ToolFn> = {
     edit_file: runEditFile,
 };
 
-async function runBash(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
+
+export async function runTool(call: ToolCall, state: State, signal?: AbortSignal): Promise<string> {
+    let output: string;
+    // dispatch function and executed
+    let fn = TOOL_HANDLERS[call.name];
+    try {
+        signal?.throwIfAborted();
+        output = await fn(call.arguments, state, signal);
+    } catch (error) {
+        signal?.throwIfAborted();
+        output = String(error);
+    }
+    return output;
+}
+
+export async function runBash(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
     const res = BashSchema.safeParse(args);
     if (!res.success) {
@@ -142,7 +91,7 @@ async function runBash(args: unknown, state: State, signal?: AbortSignal): Promi
     }
 }
 
-async function runReadFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
+export async function runReadFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
     const res = ReadFileSchema.safeParse(args);
     if (!res.success) {
@@ -162,7 +111,7 @@ async function runReadFile(args: unknown, state: State, signal?: AbortSignal): P
     return content;
 }
 
-async function runWriteFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
+export async function runWriteFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
     const res = WriteFileSchema.safeParse(args);
     if (!res.success) {
@@ -182,7 +131,7 @@ async function runWriteFile(args: unknown, state: State, signal?: AbortSignal): 
     return "write file successfully";
 }
 
-async function runEditFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
+export async function runEditFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
     signal?.throwIfAborted();
     const res = EditFileSchema.safeParse(args);
     if (!res.success) {

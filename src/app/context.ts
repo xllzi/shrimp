@@ -1,5 +1,6 @@
-import type { Message, ModelConfig } from "./llm.ts";
-import type { ToolDefinition } from "./tools.ts";
+import type { Message } from "../domain/agent.ts";
+import type { ModelConfig } from "../adapter/llm.ts";
+import type { ToolDefinition } from "../domain/tools.ts";
 
 export function contextInject(query: string, context: string): string {
     return context + "\n" + query

@@ -1,6 +1,7 @@
+import type { AssistantMessage, Message, UserMessage } from "../domain/agent.ts";
+import type { Message as AnthropicMessage } from "@anthropic-ai/sdk/resources/messages/messages";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Message as AnthropicMessage } from "@anthropic-ai/sdk/resources/messages/messages";
 import type { Responses } from "openai/resources/responses";
 import {
     anthropicMessageToMessage,
@@ -8,9 +9,6 @@ import {
     messageToAnthropicMessages,
     messageToResponseInput,
     responseOutputToMessage,
-    type AssistantMessage,
-    type Message,
-    type UserMessage,
 } from "./llm.ts";
 
 const openAIUsage: Responses.ResponseUsage = {

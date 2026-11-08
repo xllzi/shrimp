@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, utimes, writeFile, watch } from "node:fs/promises";
 import { getEventListeners } from "node:events";
-import { setTimeout } from "node:timers/promises";
+import { mkdtemp, readFile, rm, stat, utimes, watch, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { TOOL_HANDLERS } from "./tools.ts";
+import { setTimeout } from "node:timers/promises";
 import type { State } from "./agent.ts";
+import { TOOL_HANDLERS } from "../app/tools.ts";
 
 async function createFile(t: TestContext, content: string): Promise<string> {
     const directory = await mkdtemp(path.join(tmpdir(), "shrimp-edit-"));

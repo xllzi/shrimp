@@ -1,9 +1,22 @@
+import { parseBash } from "../adapter/bash.ts";
+import { createPermissionCheck } from "./permission.ts";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { agentLoop, type State } from "./agent.ts";
-import { LLM_ADAPTERS, responseOutputToMessage, messageToResponseInput, type AssistantMessage, type LlmApi, type LlmRequest, type Message } from "./llm.ts";
+import { messageToResponseInput, LLM_ADAPTERS, type LlmApi, type LlmRequest, responseOutputToMessage } from "../adapter/llm.ts";
+import type { AssistantMessage, Message, State } from "../domain/agent.ts";
+import { onPostToolUse, onPreToolUse } from "./hooks.ts";
 import { TOOL_HANDLERS, type ToolFn } from "./tools.ts";
-import { onPreToolUse, onPostToolUse } from "./hooks.ts";
+import { agentLoop as runAgentLoop } from "./agent.ts";
+
+const permissionCheck = createPermissionCheck({
+    workspace: process.cwd(),
+    parseBash,
+    askPermission: async () => { throw new Error("Unexpected approval prompt in agent test"); },
+});
+
+function agentLoop(state: State, signal?: AbortSignal) {
+    return runAgentLoop(state, permissionCheck, signal);
+}
 
 function deferred<T = void>() {
     let resolve!: (value: T | PromiseLike<T>) => void;

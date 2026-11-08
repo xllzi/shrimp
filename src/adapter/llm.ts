@@ -1,79 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
+import type { Message as AnthropicMessage, MessageParam } from "@anthropic-ai/sdk/resources/messages/messages";
 import OpenAI from "openai";
 import type { Responses } from "openai/resources/responses";
-import type { Message as AnthropicMessage, MessageParam } from "@anthropic-ai/sdk/resources/messages/messages";
-import type { ToolDefinition } from "./tools.ts";
-import { parseToolArguments } from "./tools.ts";
-
-export type LlmApi = "openai-responses" | "anthropic-messages";
-
-export interface ModelConfig {
-    api: LlmApi;
-    model: string;
-    maxOutputTokens?: number;
-}
-
-export interface TextContent {
-    type: "text";
-    text: string;
-}
-
-export interface RefusalContent {
-    type: "refusal";
-    refusal: string;
-}
-
-export interface ThinkingContent {
-    type: "thinking";
-    thinking: string;
-    thinkingSignature?: string;
-    thinkingApi?: LlmApi;
-}
-
-export interface RedactedThinkingContent {
-    type: "redactedThinking";
-    data: string;
-}
-
-export interface ToolCall {
-    type: "toolCall";
-    id: string;
-    itemId?: string;
-    name: string;
-    arguments: Record<string, unknown>;
-}
-
-// An invalid call keeps the original JSON text so the model can correct its arguments.
-export interface InvalidToolCall extends Omit<ToolCall, "arguments"> {
-    rawArguments: string;
-    argumentError: string;
-}
-
-export interface UserMessage {
-    role: "user";
-    content: TextContent[];
-}
-
-export interface Usage {
-    input_tokens: number,
-    output_tokens: number,
-    cache_read_tokens: number,
-}
-
-export interface AssistantMessage {
-    role: "assistant";
-    content: (TextContent | RefusalContent | ThinkingContent | RedactedThinkingContent | ToolCall | InvalidToolCall)[];
-    usage: Usage; // Usage for the model request that produced this message.
-}
-
-export interface ToolResultMessage {
-    role: "tool";
-    toolCallId: string;
-    toolName: string;
-    content: TextContent[];
-}
-
-export type Message = UserMessage | AssistantMessage | ToolResultMessage;
+import type { AssistantMessage, InvalidToolCall, Message, ToolCall, Usage } from "../domain/agent.ts";
+import { type ToolDefinition, parseToolArguments } from "../domain/tools.ts";
 
 export interface LlmRequest {
     model: ModelConfig;
@@ -371,6 +301,14 @@ const anthropicMessagesAdapter: LlmAdapter = async (request) => {
     }
     throw new Error("Stream ended without a completed response");
 };
+
+export type LlmApi = "openai-responses" | "anthropic-messages";
+
+export interface ModelConfig {
+    api: LlmApi;
+    model: string;
+    maxOutputTokens?: number;
+}
 
 export const LLM_ADAPTERS: LlmAdapters = {
     "openai-responses": openAIResponsesAdapter,
