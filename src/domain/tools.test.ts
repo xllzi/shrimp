@@ -6,7 +6,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { setTimeout } from "node:timers/promises";
 import type { State } from "./agent.ts";
-import { TOOL_HANDLERS } from "../app/tools.ts";
+import { runTool, TOOL_HANDLERS, type ToolFailure } from "../app/tools.ts";
 
 async function createFile(t: TestContext, content: string): Promise<string> {
     const directory = await mkdtemp(path.join(tmpdir(), "shrimp-edit-"));
@@ -117,6 +117,18 @@ test("bash preserves stdout and reports command failures", async () => {
     const state: State = { messages: [], loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     assert.equal(await TOOL_HANDLERS.bash({ commands: "printf hello" }, state), "hello");
     await assert.rejects(Promise.resolve(TOOL_HANDLERS.bash({ commands: "printf failure >&2; exit 7" }, state)), /failed \(7\): failure/);
+});
+
+test("a bash timeout reports a structured failure alongside the existing tool output", { skip: process.platform === "win32", timeout: 3000 }, async (t) => {
+    const state: State = { messages: [], loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
+    const failures: ToolFailure[] = [];
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+
+    const pending = runTool({ type: "toolCall", id: "timeout", name: "bash", arguments: { commands: "sleep 60" } }, state, undefined, failure => failures.push(failure));
+    t.mock.timers.tick(30_000);
+
+    assert.equal(await pending, "Error: Bash command timed out after 30 seconds.");
+    assert.deepEqual(failures, ["timeout"]);
 });
 
 for (const name of ["bash", "read_file", "write_file", "edit_file"] as const) {

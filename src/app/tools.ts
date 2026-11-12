@@ -5,7 +5,9 @@ import z from "zod";
 import type { State, ToolCall } from "../domain/agent.ts";
 import { BashSchema, EditFileSchema, ReadFileSchema, WriteFileSchema } from "../domain/tools.ts";
 
-export type ToolFn = (args: unknown, state: State, signal?: AbortSignal) => string | Promise<string>;
+export type ToolFailure = "invalid_arguments" | "timeout" | "error";
+type ReportToolFailure = (failure: ToolFailure) => void;
+export type ToolFn = (args: unknown, state: State, signal?: AbortSignal, reportFailure?: ReportToolFailure) => string | Promise<string>;
 // The agent uses the tool name to select a function from this table.
 export const TOOL_HANDLERS: Record<string, ToolFn> = {
     bash: runBash,
@@ -15,24 +17,30 @@ export const TOOL_HANDLERS: Record<string, ToolFn> = {
 };
 
 
-export async function runTool(call: ToolCall, state: State, signal?: AbortSignal): Promise<string> {
+/** The tool handler reports failure status separately from the result text for the model. */
+export async function runTool(call: ToolCall, state: State, signal?: AbortSignal, reportFailure?: ReportToolFailure): Promise<string> {
     let output: string;
-    // dispatch function and executed
-    let fn = TOOL_HANDLERS[call.name];
+    let failure: ToolFailure | undefined;
+    const fn = TOOL_HANDLERS[call.name];
     try {
         signal?.throwIfAborted();
-        output = await fn(call.arguments, state, signal);
+        output = reportFailure
+            ? await fn(call.arguments, state, signal, status => { failure = status; })
+            : await fn(call.arguments, state, signal);
     } catch (error) {
         signal?.throwIfAborted();
+        failure ??= "error";
         output = String(error);
     }
+    if (failure) reportFailure?.(failure);
     return output;
 }
 
-export async function runBash(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
+export async function runBash(args: unknown, state: State, signal?: AbortSignal, reportFailure?: ReportToolFailure): Promise<string> {
     signal?.throwIfAborted();
     const res = BashSchema.safeParse(args);
     if (!res.success) {
+        reportFailure?.("invalid_arguments");
         return `bash parameters verification fail: ${z.prettifyError(res.error)}`;
     }
     let commands = res.data.commands;
@@ -50,10 +58,10 @@ export async function runBash(args: unknown, state: State, signal?: AbortSignal)
             child.kill("SIGKILL");
         }
     };
-    let failure: Error | undefined;
+    let failure: { error: Error; status: "timeout" | "error" } | undefined;
     // Limit the process to 30 seconds and each output buffer to 10 MiB.
     const timeout = setTimeout(() => {
-        failure = new Error("Bash command timed out after 30 seconds.");
+        failure = { error: new Error("Bash command timed out after 30 seconds."), status: "timeout" };
         kill();
     }, 30_000);
     const pending = new Promise<string>((resolve, reject) => {
@@ -64,7 +72,7 @@ export async function runBash(args: unknown, state: State, signal?: AbortSignal)
             child[stream].on("data", (chunk: Buffer) => {
                 size += chunk.length;
                 if (size > 10*1024*1024) {
-                    failure ??= new Error(`Bash ${stream} exceeded 10 MiB.`);
+                    failure ??= { error: new Error(`Bash ${stream} exceeded 10 MiB.`), status: "error" };
                     kill();
                 } else {
                     chunks.push(chunk);
@@ -77,7 +85,10 @@ export async function runBash(args: unknown, state: State, signal?: AbortSignal)
         // Wait for the process and its output streams to close after cancellation.
         child.once("close", (code, exitSignal) => {
             if (signal?.aborted) reject(signal.reason);
-            else if (failure) reject(failure);
+            else if (failure) {
+                reportFailure?.(failure.status);
+                reject(failure.error);
+            }
             else if (code !== 0) reject(new Error(`Bash command failed (${exitSignal ?? code}): ${Buffer.concat(stderr).toString()}`));
             else resolve(Buffer.concat(stdout).toString());
         });
@@ -91,10 +102,11 @@ export async function runBash(args: unknown, state: State, signal?: AbortSignal)
     }
 }
 
-export async function runReadFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
+export async function runReadFile(args: unknown, state: State, signal?: AbortSignal, reportFailure?: ReportToolFailure): Promise<string> {
     signal?.throwIfAborted();
     const res = ReadFileSchema.safeParse(args);
     if (!res.success) {
+        reportFailure?.("invalid_arguments");
         return `read_file parameters verification fail: ${z.prettifyError(res.error)}`;
     }
     let filePath = res.data.filePath;
@@ -104,6 +116,7 @@ export async function runReadFile(args: unknown, state: State, signal?: AbortSig
         signal?.throwIfAborted();
     } catch (err) {
         signal?.throwIfAborted();
+        reportFailure?.("error");
         return String(err);
     }
     let hash = createHash("sha256").update(content, "utf8").digest("hex");
@@ -111,10 +124,11 @@ export async function runReadFile(args: unknown, state: State, signal?: AbortSig
     return content;
 }
 
-export async function runWriteFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
+export async function runWriteFile(args: unknown, state: State, signal?: AbortSignal, reportFailure?: ReportToolFailure): Promise<string> {
     signal?.throwIfAborted();
     const res = WriteFileSchema.safeParse(args);
     if (!res.success) {
+        reportFailure?.("invalid_arguments");
         return `write_file parameter verification fail: ${z.prettifyError(res.error)}`;
     }
     let filePath = res.data.filePath;
@@ -124,6 +138,7 @@ export async function runWriteFile(args: unknown, state: State, signal?: AbortSi
         await writeFile(filePath, content, { signal });
     } catch (err) {
         signal?.throwIfAborted();
+        reportFailure?.("error");
         return String(err);
     }
     let hash = createHash("sha256").update(content, "utf8").digest("hex");
@@ -131,10 +146,11 @@ export async function runWriteFile(args: unknown, state: State, signal?: AbortSi
     return "write file successfully";
 }
 
-export async function runEditFile(args: unknown, state: State, signal?: AbortSignal): Promise<string> {
+export async function runEditFile(args: unknown, state: State, signal?: AbortSignal, reportFailure?: ReportToolFailure): Promise<string> {
     signal?.throwIfAborted();
     const res = EditFileSchema.safeParse(args);
     if (!res.success) {
+        reportFailure?.("invalid_arguments");
         return `Error: Invalid \`edit_file\` arguments: ${z.prettifyError(res.error)}`;
     }
     let filePath = res.data.filePath;
@@ -142,20 +158,24 @@ export async function runEditFile(args: unknown, state: State, signal?: AbortSig
     let newText = res.data.newText;
     try {
         if (!state.readFileHashes.has(filePath)) {
+            reportFailure?.("error");
             return "Error: File has not been read yet. You need to read the file first before edit the file";
         }
         const text = await readFile(filePath, { encoding: 'utf8', signal });
         signal?.throwIfAborted();
         let hash = createHash("sha256").update(text, "utf-8").digest("hex");
         if (state.readFileHashes.get(filePath) != hash) {
+            reportFailure?.("error");
             return "Error: file content changed. You need to read the file first before edit the file";
         }
         const matchStart = text.indexOf(oldText);
         if (matchStart === -1) {
+            reportFailure?.("error");
             return "Error: The content does not contain `oldText`. Before you retry, use `read_file`.";
         }
         // Reject a second match, including a match that overlaps the first one.
         if (text.indexOf(oldText, matchStart + 1) !== -1) {
+            reportFailure?.("error");
             return "Error: The content contains `oldText` more than one time. Add more context to `oldText`.";
         }
         // Insert the replacement text as literal content.
@@ -166,6 +186,7 @@ export async function runEditFile(args: unknown, state: State, signal?: AbortSig
         return "replace text successfully";
     } catch (err) {
         signal?.throwIfAborted();
+        reportFailure?.("error");
         return String(err);
     }
 }

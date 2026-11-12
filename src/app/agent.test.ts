@@ -7,6 +7,7 @@ import type { AssistantMessage, Message, State } from "../domain/agent.ts";
 import { onPostToolUse, onPreToolUse } from "./hooks.ts";
 import { TOOL_HANDLERS, type ToolFn } from "./tools.ts";
 import { agentLoop as runAgentLoop } from "./agent.ts";
+import type { TraceEvent } from "./trace.ts";
 
 const permissionCheck = createPermissionCheck({
     workspace: process.cwd(),
@@ -35,11 +36,16 @@ const reply: AssistantMessage = {
 
 test("a model error returns its cause without an assistant message", async (t) => {
     const messages = history();
+    const events: TraceEvent[] = [];
     const error = new Error("Test request failed.");
     t.mock.method(LLM_ADAPTERS, "anthropic-messages", async () => { throw error; });
 
-    assert.deepEqual(await agentLoop({ messages, loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }), { stop_reason: "model_error", error });
+    const state = { messages, loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
+    assert.deepEqual(await runAgentLoop(state, permissionCheck, undefined, event => events.push(event)), { stop_reason: "model_error", error });
     assert.equal(messages.length, 1);
+    assert.deepEqual(events.map(event => event.type), ["run.started", "model.started", "model.finished", "run.finished"]);
+    assert.deepEqual(events.flatMap(event => event.type === "model.finished" ? [event.status, event.usage] : []), ["error", undefined]);
+    assert.deepEqual(events.flatMap(event => event.type === "run.finished" ? [event.stop_reason] : []), ["model_error"]);
 });
 
 test("the model can correct invalid JSON while valid calls in the same response still run", async (t) => {
@@ -106,6 +112,7 @@ test("cancellation stops an active request and the next run can complete", { tim
     const controller = new AbortController();
     const started = deferred();
     const messages = history();
+    const events: TraceEvent[] = [];
     const adapter = t.mock.method(LLM_ADAPTERS, "anthropic-messages", (request: LlmRequest) => {
         assert.equal(request.signal, controller.signal);
         assert.ok(request.signal);
@@ -115,11 +122,15 @@ test("cancellation stops an active request and the next run can complete", { tim
         });
     });
 
-    const pending = agentLoop({ messages, loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }, controller.signal);
+    const state = { messages, loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
+    const pending = runAgentLoop(state, permissionCheck, controller.signal, event => events.push(event));
     await started.promise;
     controller.abort();
     assert.deepEqual(await pending, { stop_reason: "cancelled" });
     assert.equal(messages.length, 1);
+    assert.deepEqual(events.map(event => event.type), ["run.started", "model.started", "model.finished", "run.finished"]);
+    assert.deepEqual(events.flatMap(event => event.type === "model.finished" ? [event.status] : []), ["cancelled"]);
+    assert.deepEqual(events.flatMap(event => event.type === "run.finished" ? [event.stop_reason] : []), ["cancelled"]);
 
     adapter.mock.mockImplementation(async () => reply);
     assert.deepEqual(await agentLoop({ messages, loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }, new AbortController().signal), {
@@ -169,6 +180,7 @@ test("cancellation reaches the active tool, skips later tools and hooks, and all
     const controller = new AbortController();
     const started = deferred();
     const messages = history();
+    const events: TraceEvent[] = [];
     const state = { messages, loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     const adapter = t.mock.method(LLM_ADAPTERS, "anthropic-messages", async (): Promise<AssistantMessage> => ({
         role: "assistant", usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 },
@@ -191,13 +203,16 @@ test("cancellation reaches the active tool, skips later tools and hooks, and all
         });
     });
 
-    const pending = agentLoop(state, controller.signal);
+    const pending = runAgentLoop(state, permissionCheck, controller.signal, event => events.push(event));
     await started.promise;
     controller.abort("user-cancel");
     assert.deepEqual(await pending, { stop_reason: "cancelled" });
     assert.equal(tool.mock.callCount(), 1);
     assert.equal(adapter.mock.callCount(), 1);
     assert.equal(postCalls, 0);
+    assert.deepEqual(events.flatMap(event => event.type === "tool.finished" ? [[event.tool_call_id, event.status]] : []), [
+        ["active-cancel", "cancelled"], ["pending-cancel", "cancelled"],
+    ]);
     assert.deepEqual(messages.slice(2), [
         { role: "tool", toolCallId: "active-cancel", toolName: "read_file", content: [{ type: "text", text: "Tool execution cancelled." }] },
         { role: "tool", toolCallId: "pending-cancel", toolName: "read_file", content: [{ type: "text", text: "Tool execution cancelled before it started." }] },
@@ -235,6 +250,44 @@ test("ordinary tool errors remain tool results", async (t) => {
 
     assert.deepEqual(await agentLoop({ messages, loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }), { stop_reason: "completed", message: reply });
     assert.deepEqual(messages[2], { role: "tool", toolCallId: "failure", toolName: "read_file", content: [{ type: "text", text: "Error: Read failed." }] });
+});
+
+test("trace distinguishes invalid tool arguments, a denial, and an execution failure", async (t) => {
+    const events: TraceEvent[] = [];
+    const state = { messages: history(), loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
+    const first = responseOutputToMessage([
+        { type: "function_call", call_id: "invalid_json", name: "read_file", arguments: "{" },
+        { type: "function_call", call_id: "invalid_schema", name: "read_file", arguments: "{}" },
+        { type: "function_call", call_id: "denied", name: "read_file", arguments: '{"filePath":"unused"}' },
+        { type: "function_call", call_id: "failure", name: "read_file", arguments: JSON.stringify({ filePath: `${import.meta.filename}/missing` }) },
+    ]);
+    t.mock.method(LLM_ADAPTERS, "anthropic-messages", async (request: LlmRequest) => request.messages.length === 1 ? first : reply);
+
+    const result = await runAgentLoop(state, async call => ({
+        permission: call.id === "denied" ? "deny" : "allow", message: "private permission detail",
+    }), undefined, event => events.push(event));
+
+    assert.equal(result.stop_reason, "completed");
+    assert.deepEqual(events.flatMap(event => event.type === "tool.finished" ? [[event.tool_call_id, event.status]] : []), [
+        ["invalid_json", "invalid_arguments"], ["invalid_schema", "invalid_arguments"], ["denied", "denied"], ["failure", "error"],
+    ]);
+    assert.doesNotMatch(JSON.stringify(events), /private permission detail|missing|ENOTDIR/);
+});
+
+test("an unexpected tool lifecycle error closes its trace and still rejects the run", async (t) => {
+    const events: TraceEvent[] = [];
+    const state = { messages: history(), loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
+    const error = new Error("Unexpected permission failure.");
+    t.mock.method(LLM_ADAPTERS, "anthropic-messages", async (): Promise<AssistantMessage> => ({
+        ...reply, content: [{ type: "toolCall", id: "unexpected", name: "read_file", arguments: { filePath: "unused" } }],
+    }));
+
+    await assert.rejects(runAgentLoop(state, async () => { throw error; }, undefined, event => events.push(event)), error);
+
+    assert.deepEqual(events.map(event => event.type), ["run.started", "model.started", "model.finished", "tool.started", "tool.finished", "run.finished"]);
+    assert.deepEqual(events.flatMap(event => event.type === "tool.finished" ? [event.status] : []), ["error"]);
+    assert.deepEqual(events.flatMap(event => event.type === "run.finished" ? [event.stop_reason] : []), ["error"]);
+    assert.doesNotMatch(JSON.stringify(events), /Unexpected permission failure/);
 });
 
 function useTestKey(t: TestContext, api: LlmApi): void {
