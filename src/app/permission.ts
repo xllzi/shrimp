@@ -3,6 +3,15 @@ import { evaluatePermission, type Approval, type BashSyntax, type PermissionDeci
 
 export type PermissionCheck = (call: ToolCall, signal?: AbortSignal) => Promise<PermissionDecision>;
 
+/**
+ * Allow every tool call after checking for cancellation.
+ * Use this check for isolated evaluation runs.
+ */
+export const allowAllPermissionCheck: PermissionCheck = async (_call, signal) => {
+    signal?.throwIfAborted();
+    return { permission: "allow", message: "" };
+};
+
 export interface PermissionDependencies {
     workspace: string;
     parseBash: (commands: string) => BashSyntax | null;
