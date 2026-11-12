@@ -71,5 +71,5 @@ Source files:
 - [Tool handlers](../src/app/tools.ts)
 - [Permission rules](../src/domain/permission.ts)
 - [Approval flow](../src/app/permission.ts)
-- [Terminal approval](../src/adapter/permission.ts)
+- [Terminal approval](../src/adapter/cli.ts)
 - [Entry point](../src/main.ts)

@@ -6,6 +6,7 @@ import type { State, ToolCall } from "../domain/agent.ts";
 import { BashSchema, EditFileSchema, ReadFileSchema, WriteFileSchema } from "../domain/tools.ts";
 
 export type ToolFailure = "invalid_arguments" | "timeout" | "error";
+export type ToolCallStatus = "completed" | "cancelled" | "denied" | ToolFailure;
 type ReportToolFailure = (failure: ToolFailure) => void;
 export type ToolFn = (args: unknown, state: State, signal?: AbortSignal, reportFailure?: ReportToolFailure) => string | Promise<string>;
 // The agent uses the tool name to select a function from this table.

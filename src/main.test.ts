@@ -13,6 +13,12 @@ let requests = 0;
 globalThis.fetch = async (_input, init) => {
     requests++;
     const phase = process.env.TEST_CANCEL_PHASE;
+    if (phase === "trace" && requests === 2) {
+        const [result] = JSON.parse(init.body).messages.at(-1).content;
+        if (result.type !== "tool_result" || result.content[0]?.text !== "TRACE_TOOL_OUTPUT") {
+            throw new Error("The model did not receive the full tool output.");
+        }
+    }
     if (requests <= 2 && phase === "request") {
         process.stdout.write("TEST_WAIT_" + requests + "\\n");
         return new Promise((_, reject) => {
@@ -33,7 +39,8 @@ globalThis.fetch = async (_input, init) => {
     ] : [
         { type: "message_start", message: { id: "test", type: "message", role: "assistant", content: [], model: "test", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
         { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "TEST_COMPLETE" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "TEST_" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "COMPLETE" } },
         { type: "content_block_stop", index: 0 },
         { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } },
         { type: "message_stop" },
@@ -175,12 +182,14 @@ for (const mode of ["enabled", "disabled", "blocked"] as const) {
         child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
         const stdout = child.stdout.setEncoding("utf8")[Symbol.asyncIterator]();
         let output = "";
+        let transcript = "";
         async function expect(marker: string) {
             let index = output.indexOf(marker);
             while (index === -1) {
                 const chunk = await stdout.next();
                 assert.equal(chunk.done, false, `CLI exited while waiting for ${marker}. ${stderr}`);
                 output += chunk.value;
+                transcript += chunk.value;
                 index = output.indexOf(marker);
             }
             output = output.slice(index + marker.length);
@@ -188,7 +197,7 @@ for (const mode of ["enabled", "disabled", "blocked"] as const) {
 
         await expect("> ");
         child.stdin.write("TRACE_PRIVATE_PROMPT\n");
-        await expect("TRACE_TOOL_OUTPUT");
+        await expect("bash: completed\n");
         await expect("TEST_COMPLETE");
         await expect("> ");
         child.stdin.write("second prompt\n");
@@ -196,6 +205,7 @@ for (const mode of ["enabled", "disabled", "blocked"] as const) {
         await expect("> ");
         child.stdin.end(":q\n");
         assert.deepEqual(await closed, [0, null]);
+        assert.equal(transcript, "> bash: completed\nTEST_COMPLETE\n> TEST_COMPLETE\n> ");
 
         const warnings = stderr.match(/Shrimp could not write trace events/g) ?? [];
         assert.equal(warnings.length, mode === "blocked" ? 1 : 0);

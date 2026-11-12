@@ -5,6 +5,10 @@ import type { Responses } from "openai/resources/responses";
 import type { AssistantMessage, InvalidToolCall, Message, ToolCall, Usage } from "../domain/agent.ts";
 import { type ToolDefinition, parseToolArguments } from "../domain/tools.ts";
 
+export type ModelTextEvent =
+    | { type: "text.delta"; text: string }
+    | { type: "text.end" };
+
 export interface LlmRequest {
     model: ModelConfig;
     messages: Message[];
@@ -12,6 +16,8 @@ export interface LlmRequest {
     tools?: ToolDefinition[];
     /** The caller uses this signal to cancel the model request. */
     signal?: AbortSignal;
+    /** Send reply text as it arrives. The adapter returns the complete message. */
+    onText?: (event: ModelTextEvent) => void;
 }
 
 export type LlmAdapter = (request: LlmRequest) => Promise<AssistantMessage>;
@@ -139,23 +145,10 @@ const openAIResponsesAdapter: LlmAdapter = async (request) => {
     }, { signal: request.signal });
     // The SDK uses the signal to stop the HTTP request and the response stream.
     for await (const event of response) {
-        if (event.type === "response.output_item.added") {
-            switch (event.item.type) {
-                case "reasoning":
-                    console.log("Thinking...");
-                    break;
-                case "message":
-                    console.log("Responding...");
-                    break;
-            }
-        } else if (event.type === "response.reasoning_text.delta") {
-            process.stdout.write(event.delta);
-        } else if (event.type === "response.reasoning_text.done") {
-            console.log();
-        } else if (event.type === "response.output_text.delta") {
-            process.stdout.write(event.delta);
-        } else if (event.type === "response.output_item.done") {
-            console.log();
+        if (event.type === "response.output_text.delta") {
+            request.onText?.({ type: "text.delta", text: event.delta });
+        } else if (event.type === "response.output_text.done") {
+            request.onText?.({ type: "text.end" });
         } else if (event.type === "error") {
             throw new Error(event.message);
         } else if (event.type === "response.completed") {
@@ -268,36 +261,23 @@ const anthropicMessagesAdapter: LlmAdapter = async (request) => {
         } : {}),
     }, { signal: request.signal });
 
-    try {
-        for await (const event of response) {
-            if (event.type === "content_block_start") {
-                switch (event.content_block.type) {
-                  case "thinking":
-                    console.log("Thinking...");
-                    break;
-                  case "text":
-                    console.log("Responding...");
-                    break;
-                }
-            } else if (event.type === "content_block_delta") {
-                switch (event.delta.type) {
-                  case "thinking_delta":
-                    process.stdout.write(event.delta.thinking);
-                    break;
-                  case "text_delta":
-                    process.stdout.write(event.delta.text);
-                    break;
-                }
-            } else if (event.type === "content_block_stop") {
-                console.log();
-            } else if (event.type === "message_stop") {
-                return anthropicMessageToMessage(await response.finalMessage());
-            }
+    const { onText } = request;
+    // A stop event identifies the block by index. Keep the indexes of the text blocks.
+    const textBlocks = new Set<number>();
+    for await (const event of response) {
+        if (event.type === "message_stop") {
+            return anthropicMessageToMessage(await response.finalMessage());
         }
-    } catch (error) {
-        // A user cancellation is not a model error.
-        if (!request.signal?.aborted) console.error("Anthropic stream failed");
-        throw error;
+        if (!onText) continue;
+        if (event.type === "content_block_start" && event.content_block.type === "text") {
+            textBlocks.add(event.index);
+            const { text } = event.content_block;
+            if (text) onText({ type: "text.delta", text });
+        } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+            onText({ type: "text.delta", text: event.delta.text });
+        } else if (event.type === "content_block_stop" && textBlocks.delete(event.index)) {
+            onText({ type: "text.end" });
+        }
     }
     throw new Error("Stream ended without a completed response");
 };

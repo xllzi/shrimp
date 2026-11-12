@@ -13,14 +13,13 @@ The agent runs a tool only after an `allow` decision, while the turn is active. 
 | Domain | [src/domain/permission.ts](../src/domain/permission.ts) | Defines the rules and returns a verdict. |
 | Application | [src/app/permission.ts](../src/app/permission.ts) | Requests approval for `ask` and checks cancellation. |
 | Adapter | [src/adapter/bash.ts](../src/adapter/bash.ts) | Parses Bash commands and extracts facts from the syntax tree. |
-| Adapter | [src/adapter/permission.ts](../src/adapter/permission.ts) | Shows the terminal prompt and reads the answer. |
-| Entry point | [src/main.ts](../src/main.ts) | Supplies the workspace, parser, and approval callback. |
+| Adapter | [src/adapter/cli.ts](../src/adapter/cli.ts) | Supplies the workspace, parser, and terminal approval callback. |
 
 The domain rules use the supplied data. They do not prompt the user or read the process working directory.
 
 `parseBash` uses tree-sitter and the Bash grammar. The packages `web-tree-sitter` and `tree-sitter-bash` supply the WebAssembly files. The adapter returns plain command, pipeline, and redirect facts in a `BashSyntax` value. It does not decide permission.
 
-`main.ts` calls `createPermissionCheck({ workspace, parseBash, askPermission })`. It sets `workspace` to `process.cwd()` when it starts the session. It passes the resulting function to `agentLoop(state, permissionCheck, signal)`.
+`runCli` calls `createPermissionCheck({ workspace, parseBash, askPermission })`. It uses `process.cwd()` as the workspace and passes the permission check to `agentLoop`. The approval callback and the main prompt use the same input reader.
 
 ## Verdicts and decisions
 

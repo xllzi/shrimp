@@ -1,10 +1,10 @@
-import { type ModelConfig, llmStream } from "../adapter/llm.ts";
+import { type ModelConfig, type ModelTextEvent, llmStream } from "../adapter/llm.ts";
 import type { AssistantMessage, InvalidToolCall, State, ToolCall, ToolResultMessage } from "../domain/agent.ts";
 import { applyModelResponse, applyPostToolUse, applyPreToolUse, applyStop } from "./hooks.ts";
 import { TOOL_DEFINITIONS } from "../domain/tools.ts";
 import type { PermissionCheck } from "./permission.ts";
-import { runTool, type ToolFailure } from "./tools.ts";
-import { createRunTrace, type EmitTrace, type RunStopReason, type ToolTraceStatus, type TraceSink } from "./trace.ts";
+import { runTool, type ToolCallStatus, type ToolFailure } from "./tools.ts";
+import { createRunTrace, type EmitTrace, type RunStopReason, type TraceSink } from "./trace.ts";
 
 const MODEL: ModelConfig = {
     api: "anthropic-messages",
@@ -16,16 +16,21 @@ type AgentLoopResult =
     | { error: unknown, stop_reason: "model_error"}
     | { stop_reason: "cancelled" }
 
+export type AgentOutputEvent = ModelTextEvent | { type: "tool.finished"; tool_name: string; status: ToolCallStatus };
+type AgentOutputSink = (event: AgentOutputEvent) => void;
+
 /**
  * Run the model and its tool calls until a response has no tool calls.
  * Append each response and tool result to `messages` in place.
  * Return a separate result for a model error or a user cancellation.
+ * If the caller supplies `onOutput`, send reply text and tool status to it.
  */
 export async function agentLoop(
     state: State,
     permissionCheck: PermissionCheck,
     signal?: AbortSignal,
     traceSink?: TraceSink,
+    onOutput?: AgentOutputSink,
 ): Promise<AgentLoopResult> {
     const trace = traceSink && createRunTrace(traceSink);
     // Use a monotonic clock to measure elapsed time.
@@ -33,7 +38,7 @@ export async function agentLoop(
     trace?.({ type: "run.started", model: MODEL.model });
     let stopReason: RunStopReason = "error";
     try {
-        const result = await runAgentLoop(state, permissionCheck, signal, trace);
+        const result = await runAgentLoop(state, permissionCheck, signal, trace, onOutput);
         stopReason = result.stop_reason;
         return result;
     } finally {
@@ -42,7 +47,13 @@ export async function agentLoop(
     }
 }
 
-async function runAgentLoop(state: State, permissionCheck: PermissionCheck, signal?: AbortSignal, trace?: EmitTrace): Promise<AgentLoopResult> {
+async function runAgentLoop(
+    state: State,
+    permissionCheck: PermissionCheck,
+    signal?: AbortSignal,
+    trace?: EmitTrace,
+    onOutput?: AgentOutputSink,
+): Promise<AgentLoopResult> {
     const messages = state.messages;
     let round = 0;
     while (true) {
@@ -61,6 +72,7 @@ async function runAgentLoop(state: State, permissionCheck: PermissionCheck, sign
                     messages,
                     tools: TOOL_DEFINITIONS,
                     signal,
+                    onText: onOutput,
                 });
             } finally {
                 trace?.({
@@ -86,10 +98,8 @@ async function runAgentLoop(state: State, permissionCheck: PermissionCheck, sign
         if (toolCalls.length > 0) {
             // Run the tool calls in the order of the response.
             for (const call of toolCalls) {
-                const result = await executeToolCall(call, state, permissionCheck, signal, round, trace);
+                const result = await executeToolCall(call, state, permissionCheck, signal, round, trace, onOutput);
                 messages.push(result);
-                console.log("-----function call output-----");
-                console.log(result.content[0]?.text);
             }
             // The next model request includes all tool results from this response.
         } else {
@@ -107,11 +117,12 @@ async function executeToolCall(
     signal: AbortSignal | undefined,
     round: number,
     trace?: EmitTrace,
+    onOutput?: AgentOutputSink,
 ): Promise<ToolResultMessage> {
     const traceFields = { round, tool_call_id: call.id, tool_name: call.name };
     trace?.({ type: "tool.started", ...traceFields });
     const startedAt = performance.now();
-    let status: ToolTraceStatus = "error";
+    let status: ToolCallStatus = "error";
     let output: string;
     try {
         // Keep a result for each call, even if cancellation prevents its execution.
@@ -128,7 +139,8 @@ async function executeToolCall(
             signal?.throwIfAborted();
             if (finding.permission === "allow") {
                 let failure: ToolFailure | undefined;
-                output = await runTool(call, state, signal, trace && (outcome => { failure = outcome; }));
+                const reportFailure = trace || onOutput ? (outcome: ToolFailure) => { failure = outcome; } : undefined;
+                output = await runTool(call, state, signal, reportFailure);
                 status = failure ?? "completed";
             } else {
                 status = "denied";
@@ -145,6 +157,7 @@ async function executeToolCall(
         output = "Tool execution cancelled.";
     } finally {
         trace?.({ type: "tool.finished", ...traceFields, duration_ms: performance.now() - startedAt, status });
+        onOutput?.({ type: "tool.finished", tool_name: call.name, status });
     }
     return { role: "tool", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: output }] };
 }

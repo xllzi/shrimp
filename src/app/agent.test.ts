@@ -2,11 +2,11 @@ import { parseBash } from "../adapter/bash.ts";
 import { createPermissionCheck } from "./permission.ts";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { messageToResponseInput, LLM_ADAPTERS, type LlmApi, type LlmRequest, responseOutputToMessage } from "../adapter/llm.ts";
+import { messageToResponseInput, LLM_ADAPTERS, type LlmApi, type LlmRequest, type ModelTextEvent, responseOutputToMessage } from "../adapter/llm.ts";
 import type { AssistantMessage, Message, State } from "../domain/agent.ts";
 import { onPostToolUse, onPreToolUse } from "./hooks.ts";
 import { TOOL_HANDLERS, type ToolFn } from "./tools.ts";
-import { agentLoop as runAgentLoop } from "./agent.ts";
+import { agentLoop as runAgentLoop, type AgentOutputEvent } from "./agent.ts";
 import type { TraceEvent } from "./trace.ts";
 
 const permissionCheck = createPermissionCheck({
@@ -239,8 +239,9 @@ test("cancellation during a pre-tool hook prevents tool execution", async (t) =>
     assert.equal(messages.at(-1)?.role, "tool");
 });
 
-test("ordinary tool errors remain tool results", async (t) => {
+test("ordinary tool errors remain tool results and a headless run has no stdout", async (t) => {
     const messages = history();
+    const stdout = t.mock.method(process.stdout, "write");
     let requests = 0;
     t.mock.method(LLM_ADAPTERS, "anthropic-messages", async (): Promise<AssistantMessage> => {
         if (requests++ > 0) return reply;
@@ -249,11 +250,13 @@ test("ordinary tool errors remain tool results", async (t) => {
     t.mock.method(TOOL_HANDLERS, "read_file", async () => { throw new Error("Read failed."); });
 
     assert.deepEqual(await agentLoop({ messages, loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }), { stop_reason: "completed", message: reply });
+    assert.equal(stdout.mock.callCount(), 0);
     assert.deepEqual(messages[2], { role: "tool", toolCallId: "failure", toolName: "read_file", content: [{ type: "text", text: "Error: Read failed." }] });
 });
 
-test("trace distinguishes invalid tool arguments, a denial, and an execution failure", async (t) => {
+test("output and trace share the status of invalid, denied, and failed tool calls", async (t) => {
     const events: TraceEvent[] = [];
+    const output: AgentOutputEvent[] = [];
     const state = { messages: history(), loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     const first = responseOutputToMessage([
         { type: "function_call", call_id: "invalid_json", name: "read_file", arguments: "{" },
@@ -265,12 +268,15 @@ test("trace distinguishes invalid tool arguments, a denial, and an execution fai
 
     const result = await runAgentLoop(state, async call => ({
         permission: call.id === "denied" ? "deny" : "allow", message: "private permission detail",
-    }), undefined, event => events.push(event));
+    }), undefined, event => events.push(event), event => output.push(event));
 
     assert.equal(result.stop_reason, "completed");
     assert.deepEqual(events.flatMap(event => event.type === "tool.finished" ? [[event.tool_call_id, event.status]] : []), [
         ["invalid_json", "invalid_arguments"], ["invalid_schema", "invalid_arguments"], ["denied", "denied"], ["failure", "error"],
     ]);
+    assert.deepEqual(output, ["invalid_arguments", "invalid_arguments", "denied", "error"].map(status => ({
+        type: "tool.finished", tool_name: "read_file", status,
+    })));
     assert.doesNotMatch(JSON.stringify(events), /private permission detail|missing|ENOTDIR/);
 });
 
@@ -330,14 +336,6 @@ for (const api of ["openai-responses", "anthropic-messages"] as const) {
         const controller = new AbortController();
         const streamed = deferred();
         const partial = "partial-test-output";
-        const write = process.stdout.write.bind(process.stdout);
-        t.mock.method(process.stdout, "write", (...args: Parameters<typeof process.stdout.write>) => {
-            if (args[0] === partial) {
-                streamed.resolve();
-                return true;
-            }
-            return write(...args);
-        });
         t.mock.method(globalThis, "fetch", async (_input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
             const signal = init?.signal;
             assert.ok(signal);
@@ -361,10 +359,52 @@ for (const api of ["openai-responses", "anthropic-messages"] as const) {
 
         const pending = LLM_ADAPTERS[api]({
             model: { api, model: "test-model" }, messages: history(), signal: controller.signal,
+            onText(event) {
+                if (event.type === "text.delta" && event.text === partial) streamed.resolve();
+            },
         });
         const rejected = assert.rejects(pending);
         await streamed.promise;
         controller.abort();
         await rejected;
+    });
+
+    test(`${api} sends text fragments once and keeps the complete model message`, async (t) => {
+        useTestKey(t, api);
+        const stdout = t.mock.method(process.stdout, "write");
+        const output: ModelTextEvent[] = [];
+        const parts = ["First part. ", "Second part."];
+        const text = parts.join("");
+        const thinking = "Private thinking.";
+        const events = api === "openai-responses" ? [
+            { type: "response.reasoning_text.delta", delta: thinking },
+            ...parts.map(delta => ({ type: "response.output_text.delta", delta })),
+            { type: "response.output_text.done", text },
+            { type: "response.completed", response: { output: [
+                { type: "reasoning", summary: [{ type: "summary_text", text: thinking }] },
+                { type: "message", content: [{ type: "output_text", text }] },
+            ] } },
+        ] : [
+            { type: "message_start", message: { id: "test", type: "message", role: "assistant", content: [], model: "test-model", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
+            { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
+            { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking } },
+            { type: "content_block_stop", index: 0 },
+            { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
+            ...parts.map(text => ({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text } })),
+            { type: "content_block_stop", index: 1 },
+            { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } },
+            { type: "message_stop" },
+        ];
+        const body = events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+        t.mock.method(globalThis, "fetch", async () => new Response(body, { headers: { "content-type": "text/event-stream" } }));
+        const request: LlmRequest = { model: { api, model: "test-model" }, messages: history() };
+
+        const message = await LLM_ADAPTERS[api]({ ...request, onText: event => output.push(event) });
+        assert.deepEqual(await LLM_ADAPTERS[api](request), message);
+
+        assert.equal(stdout.mock.callCount(), 0);
+        assert.deepEqual(output, [{ type: "text.delta", text: parts[0] }, { type: "text.delta", text: parts[1] }, { type: "text.end" }]);
+        assert.deepEqual(message.content[1], { type: "text", text });
+        assert.equal(message.content[0]?.type === "thinking" && message.content[0].thinking, thinking);
     });
 }
