@@ -20,4 +20,4 @@ OpenAI's `error` event and SDK errors reject the request. If the stream ends bef
 
 `agentLoop` forwards text events and tool completion status to its optional `onOutput` callback. [The CLI](../src/adapter/cli.ts) prints each text fragment as it arrives and ends the line when the block closes. It prints one line with the tool name and status after each call. The model receives the complete tool result in its history.
 
-A caller can omit `onOutput` to skip regular terminal output. Hook and trace write errors go to stderr. The JSONL trace records metadata through its own callback.
+A caller can omit `onOutput` to skip regular terminal output. Hook and trace write errors go to stderr. The [JSONL trace](agent-traces.md) records metadata through its own callback.
