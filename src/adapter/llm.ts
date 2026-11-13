@@ -7,20 +7,25 @@ import { type ToolDefinition, parseToolArguments } from "../domain/tools.ts";
 
 export type ModelTextEvent =
     | { type: "text.delta"; text: string }
-    | { type: "text.end" };
+    | { type: "text.end" }
+    | { type: "thinking.delta"; text: string }
+    | { type: "thinking.end" };
 
 export interface LlmRequest {
     model: ModelConfig;
     messages: Message[];
     systemPrompt?: string;
     tools?: ToolDefinition[];
+}
+
+export interface LlmCallOptions {
     /** The caller uses this signal to cancel the model request. */
     signal?: AbortSignal;
-    /** Send reply text as it arrives. The adapter returns the complete message. */
+    /** Send reply and thinking text as it arrives. The adapter returns the complete message. */
     onText?: (event: ModelTextEvent) => void;
 }
 
-export type LlmAdapter = (request: LlmRequest) => Promise<AssistantMessage>;
+export type LlmAdapter = (request: LlmRequest, options?: LlmCallOptions) => Promise<AssistantMessage>;
 export type LlmAdapters = Record<LlmApi, LlmAdapter>;
 
 /** If the arguments fail the JSON object check, keep the tool call for an error result. */
@@ -133,7 +138,7 @@ function toOpenAITools(tools: ToolDefinition[] | undefined): Responses.Tool[] | 
     }));
 }
 
-const openAIResponsesAdapter: LlmAdapter = async (request) => {
+const openAIResponsesAdapter: LlmAdapter = async (request, { signal, onText } = {}) => {
     const client = new OpenAI();
     const response = await client.responses.create({
         model: request.model.model,
@@ -142,13 +147,17 @@ const openAIResponsesAdapter: LlmAdapter = async (request) => {
         input: request.messages.flatMap(messageToResponseInput),
         tools: toOpenAITools(request.tools),
         stream: true
-    }, { signal: request.signal });
+    }, { signal });
     // The SDK uses the signal to stop the HTTP request and the response stream.
     for await (const event of response) {
         if (event.type === "response.output_text.delta") {
-            request.onText?.({ type: "text.delta", text: event.delta });
+            onText?.({ type: "text.delta", text: event.delta });
         } else if (event.type === "response.output_text.done") {
-            request.onText?.({ type: "text.end" });
+            onText?.({ type: "text.end" });
+        } else if (event.type === "response.reasoning_text.delta") {
+            onText?.({ type: "thinking.delta", text: event.delta });
+        } else if (event.type === "response.reasoning_text.done") {
+            onText?.({ type: "thinking.end" });
         } else if (event.type === "error") {
             throw new Error(event.message);
         } else if (event.type === "response.completed") {
@@ -245,7 +254,7 @@ export function anthropicMessageToMessage(
     return { role: "assistant", content, usage };
 }
 
-const anthropicMessagesAdapter: LlmAdapter = async (request) => {
+const anthropicMessagesAdapter: LlmAdapter = async (request, { signal, onText } = {}) => {
     const client = new Anthropic();
     const response = client.messages.stream({
         model: request.model.model,
@@ -259,24 +268,36 @@ const anthropicMessagesAdapter: LlmAdapter = async (request) => {
                 input_schema: tool.parameters,
             })),
         } : {}),
-    }, { signal: request.signal });
+    }, { signal });
 
-    const { onText } = request;
-    // A stop event identifies the block by index. Keep the indexes of the text blocks.
-    const textBlocks = new Set<number>();
+    // A stop event gives the block index, so remember which end event to emit.
+    const blockEnds = new Map<number, "text.end" | "thinking.end">();
     for await (const event of response) {
         if (event.type === "message_stop") {
             return anthropicMessageToMessage(await response.finalMessage());
         }
         if (!onText) continue;
-        if (event.type === "content_block_start" && event.content_block.type === "text") {
-            textBlocks.add(event.index);
-            const { text } = event.content_block;
-            if (text) onText({ type: "text.delta", text });
-        } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-            onText({ type: "text.delta", text: event.delta.text });
-        } else if (event.type === "content_block_stop" && textBlocks.delete(event.index)) {
-            onText({ type: "text.end" });
+        if (event.type === "content_block_start") {
+            const block = event.content_block;
+            if (block.type === "text") {
+                blockEnds.set(event.index, "text.end");
+                if (block.text) onText({ type: "text.delta", text: block.text });
+            } else if (block.type === "thinking") {
+                blockEnds.set(event.index, "thinking.end");
+                if (block.thinking) onText({ type: "thinking.delta", text: block.thinking });
+            }
+        } else if (event.type === "content_block_delta") {
+            if (event.delta.type === "text_delta") {
+                onText({ type: "text.delta", text: event.delta.text });
+            } else if (event.delta.type === "thinking_delta") {
+                onText({ type: "thinking.delta", text: event.delta.thinking });
+            }
+        } else if (event.type === "content_block_stop") {
+            const type = blockEnds.get(event.index);
+            if (type) {
+                blockEnds.delete(event.index);
+                onText({ type });
+            }
         }
     }
     throw new Error("Stream ended without a completed response");
@@ -295,13 +316,13 @@ export const LLM_ADAPTERS: LlmAdapters = {
     "anthropic-messages": anthropicMessagesAdapter,
 };
 
-export function createLlmStream(adapters: LlmAdapters = LLM_ADAPTERS) {
-    return (request: LlmRequest): Promise<AssistantMessage> => {
+export function createLlmStream(adapters: LlmAdapters = LLM_ADAPTERS): LlmAdapter {
+    return (request, options) => {
         const adapter = adapters[request.model.api];
         if (typeof adapter !== "function") {
             throw new Error(`No LLM adapter registered for API: ${request.model.api}`);
         }
-        return adapter(request);
+        return adapter(request, options);
     };
 }
 

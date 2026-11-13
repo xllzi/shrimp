@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Usage } from "../domain/agent.ts";
+import type { InvalidToolCall, ToolCall, Usage } from "../domain/agent.ts";
 import type { ToolCallStatus } from "./tools.ts";
 
 export type RunStopReason = "completed" | "cancelled" | "model_error" | "error";
@@ -11,7 +11,7 @@ type TraceEventData =
     | { type: "run.finished"; duration_ms: number; stop_reason: RunStopReason }
     | { type: "model.started"; round: number }
     | { type: "model.finished"; round: number; duration_ms: number; status: "completed" | "cancelled" | "error"; usage?: Usage }
-    | ({ type: "tool.started" } & ToolTraceFields)
+    | ({ type: "tool.started"; arguments: ToolCall["arguments"] | InvalidToolCall["rawArguments"] } & ToolTraceFields)
     | ({ type: "tool.finished"; duration_ms: number; status: ToolCallStatus } & ToolTraceFields);
 
 export type TraceEvent = TraceEventData & {

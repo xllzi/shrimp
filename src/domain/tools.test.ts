@@ -6,7 +6,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { setTimeout } from "node:timers/promises";
 import type { State } from "./agent.ts";
-import { runTool, TOOL_HANDLERS, type ToolFailure } from "../app/tools.ts";
+import { runTool, TOOL_HANDLERS } from "../app/tools.ts";
 
 async function createFile(t: TestContext, content: string): Promise<string> {
     const directory = await mkdtemp(path.join(tmpdir(), "shrimp-edit-"));
@@ -26,12 +26,13 @@ for (const scenario of [
     test(`edit_file rejects ${scenario.name} without a file write`, async (t) => {
         const filePath = await createFile(t, scenario.content);
         const state: State = { messages: [], loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
-        assert.equal(await TOOL_HANDLERS.read_file({ filePath }, state), scenario.content);
+        assert.deepEqual(await TOOL_HANDLERS.read_file({ filePath }, state), { output: scenario.content, status: "completed" });
         const before = await stat(filePath);
 
-        const output = await TOOL_HANDLERS.edit_file({ filePath, oldText: scenario.oldText, newText: "replacement" }, state);
+        const result = await TOOL_HANDLERS.edit_file({ filePath, oldText: scenario.oldText, newText: "replacement" }, state);
 
-        assert.match(output, scenario.error);
+        assert.match(result.output, scenario.error);
+        assert.equal(result.status, scenario.oldText === "" ? "invalid_arguments" : "error");
         assert.equal(await readFile(filePath, "utf8"), scenario.content);
         assert.equal((await stat(filePath)).mtimeMs, before.mtimeMs);
     });
@@ -46,11 +47,11 @@ for (const scenario of [
     test(`edit_file accepts ${scenario.name}`, async (t) => {
         const filePath = await createFile(t, scenario.content);
         const state: State = { messages: [], loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
-        assert.equal(await TOOL_HANDLERS.read_file({ filePath }, state), scenario.content);
+        assert.deepEqual(await TOOL_HANDLERS.read_file({ filePath }, state), { output: scenario.content, status: "completed" });
 
-        const output = await TOOL_HANDLERS.edit_file({ filePath, oldText: scenario.oldText, newText: scenario.newText }, state);
+        const result = await TOOL_HANDLERS.edit_file({ filePath, oldText: scenario.oldText, newText: scenario.newText }, state);
 
-        assert.equal(output, "replace text successfully");
+        assert.deepEqual(result, { output: "replace text successfully", status: "completed" });
         assert.equal(await readFile(filePath, "utf8"), scenario.expected);
     });
 }
@@ -60,9 +61,10 @@ test("edit_file rejects an unread file without a file write", async (t) => {
     const state: State = { messages: [], loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     const before = await stat(filePath);
 
-    const output = await TOOL_HANDLERS.edit_file({ filePath, oldText: "beta", newText: "delta" }, state);
+    const result = await TOOL_HANDLERS.edit_file({ filePath, oldText: "beta", newText: "delta" }, state);
 
-    assert.match(output, /File has not been read yet/);
+    assert.match(result.output, /File has not been read yet/);
+    assert.equal(result.status, "error");
     assert.equal(await readFile(filePath, "utf8"), "alpha beta");
     assert.equal((await stat(filePath)).mtimeMs, before.mtimeMs);
 });
@@ -70,17 +72,19 @@ test("edit_file rejects an unread file without a file write", async (t) => {
 test("edit_file rejects changed content until read_file refreshes the saved hash", async (t) => {
     const filePath = await createFile(t, "alpha beta");
     const state: State = { messages: [], loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
-    assert.equal(await TOOL_HANDLERS.read_file({ filePath }, state), "alpha beta");
+    assert.deepEqual(await TOOL_HANDLERS.read_file({ filePath }, state), { output: "alpha beta", status: "completed" });
     await writeFile(filePath, "alpha beta gamma");
     const before = await stat(filePath);
     const args = { filePath, oldText: "beta", newText: "delta" };
 
-    assert.match(await TOOL_HANDLERS.edit_file(args, state), /file content changed/);
+    const result = await TOOL_HANDLERS.edit_file(args, state);
+    assert.match(result.output, /file content changed/);
+    assert.equal(result.status, "error");
     assert.equal(await readFile(filePath, "utf8"), "alpha beta gamma");
     assert.equal((await stat(filePath)).mtimeMs, before.mtimeMs);
 
-    assert.equal(await TOOL_HANDLERS.read_file({ filePath }, state), "alpha beta gamma");
-    assert.equal(await TOOL_HANDLERS.edit_file(args, state), "replace text successfully");
+    assert.deepEqual(await TOOL_HANDLERS.read_file({ filePath }, state), { output: "alpha beta gamma", status: "completed" });
+    assert.deepEqual(await TOOL_HANDLERS.edit_file(args, state), { output: "replace text successfully", status: "completed" });
     assert.equal(await readFile(filePath, "utf8"), "alpha delta gamma");
 });
 
@@ -110,25 +114,26 @@ test("bash cancellation stops the shell and its child commands", { skip: process
     assert.equal(getEventListeners(controller.signal, "abort").length, 0);
     await setTimeout(300);
     await assert.rejects(stat(leakedPath), { code: "ENOENT" });
-    assert.equal(await TOOL_HANDLERS.bash({ commands: "printf recovered" }, state), "recovered");
+    assert.deepEqual(await TOOL_HANDLERS.bash({ commands: "printf recovered" }, state), { output: "recovered", status: "completed" });
 });
 
 test("bash preserves stdout and reports command failures", async () => {
     const state: State = { messages: [], loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
-    assert.equal(await TOOL_HANDLERS.bash({ commands: "printf hello" }, state), "hello");
-    await assert.rejects(Promise.resolve(TOOL_HANDLERS.bash({ commands: "printf failure >&2; exit 7" }, state)), /failed \(7\): failure/);
+    assert.deepEqual(await TOOL_HANDLERS.bash({ commands: "printf hello" }, state), { output: "hello", status: "completed" });
+    assert.deepEqual(await TOOL_HANDLERS.bash({ commands: "printf failure >&2; exit 7" }, state), {
+        output: "Error: Bash command failed (7): failure",
+        status: "error",
+    });
 });
 
 test("a bash timeout reports a structured failure alongside the existing tool output", { skip: process.platform === "win32", timeout: 3000 }, async (t) => {
     const state: State = { messages: [], loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
-    const failures: ToolFailure[] = [];
     t.mock.timers.enable({ apis: ["setTimeout"] });
 
-    const pending = runTool({ type: "toolCall", id: "timeout", name: "bash", arguments: { commands: "sleep 60" } }, state, undefined, failure => failures.push(failure));
+    const pending = runTool({ type: "toolCall", id: "timeout", name: "bash", arguments: { commands: "sleep 60" } }, state);
     t.mock.timers.tick(30_000);
 
-    assert.equal(await pending, "Error: Bash command timed out after 30 seconds.");
-    assert.deepEqual(failures, ["timeout"]);
+    assert.deepEqual(await pending, { output: "Error: Bash command timed out after 30 seconds.", status: "timeout" });
 });
 
 for (const name of ["bash", "read_file", "write_file", "edit_file"] as const) {

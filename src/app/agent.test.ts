@@ -2,10 +2,10 @@ import { parseBash } from "../adapter/bash.ts";
 import { createPermissionCheck } from "./permission.ts";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { messageToResponseInput, LLM_ADAPTERS, type LlmApi, type LlmRequest, type ModelTextEvent, responseOutputToMessage } from "../adapter/llm.ts";
+import { messageToResponseInput, LLM_ADAPTERS, type LlmApi, type LlmCallOptions, type LlmRequest, type ModelTextEvent, responseOutputToMessage } from "../adapter/llm.ts";
 import type { AssistantMessage, Message, State } from "../domain/agent.ts";
 import { onPostToolUse, onPreToolUse } from "./hooks.ts";
-import { TOOL_HANDLERS, type ToolFn } from "./tools.ts";
+import { TOOL_HANDLERS, type ToolExecutionResult, type ToolFn } from "./tools.ts";
 import { agentLoop as runAgentLoop, type AgentOutputEvent } from "./agent.ts";
 import type { TraceEvent } from "./trace.ts";
 
@@ -87,8 +87,8 @@ test("the model can correct invalid JSON while valid calls in the same response 
         });
         return reply;
     });
-    const read = t.mock.method(TOOL_HANDLERS, "read_file", async () => "The sibling tool completed.");
-    const bash = t.mock.method(TOOL_HANDLERS, "bash", async (..._args: Parameters<ToolFn>) => "The corrected tool completed.");
+    const read = t.mock.method(TOOL_HANDLERS, "read_file", async () => ({ output: "The sibling tool completed.", status: "completed" }));
+    const bash = t.mock.method(TOOL_HANDLERS, "bash", async (..._args: Parameters<ToolFn>) => ({ output: "The corrected tool completed.", status: "completed" }));
 
     const state = { messages, loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
     assert.deepEqual(await agentLoop(state), { stop_reason: "completed", message: reply });
@@ -113,12 +113,13 @@ test("cancellation stops an active request and the next run can complete", { tim
     const started = deferred();
     const messages = history();
     const events: TraceEvent[] = [];
-    const adapter = t.mock.method(LLM_ADAPTERS, "anthropic-messages", (request: LlmRequest) => {
-        assert.equal(request.signal, controller.signal);
-        assert.ok(request.signal);
+    const adapter = t.mock.method(LLM_ADAPTERS, "anthropic-messages", (_request: LlmRequest, options?: LlmCallOptions) => {
+        const signal = options?.signal;
+        assert.equal(signal, controller.signal);
+        assert.ok(signal);
         started.resolve();
         return new Promise<AssistantMessage>((_, reject) => {
-            request.signal!.addEventListener("abort", () => reject(new Error("Test request cancelled.")), { once: true });
+            signal.addEventListener("abort", () => reject(new Error("Test request cancelled.")), { once: true });
         });
     });
 
@@ -164,7 +165,7 @@ test("cancellation skips pending tools and keeps their result messages", async (
     }));
     const tool = t.mock.method(TOOL_HANDLERS, "read_file", async () => {
         controller.abort();
-        return "The first tool completed.";
+        return { output: "The first tool completed.", status: "completed" };
     });
 
     assert.deepEqual(await agentLoop({ messages, loopCount: 0, readFileHashes: new Map<string, string>(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }, controller.signal), { stop_reason: "cancelled" });
@@ -198,7 +199,7 @@ test("cancellation reaches the active tool, skips later tools and hooks, and all
         assert.equal(receivedState, state);
         assert.equal(signal, controller.signal);
         started.resolve();
-        return new Promise<string>((_, reject) => {
+        return new Promise<ToolExecutionResult>((_, reject) => {
             signal!.addEventListener("abort", () => reject(signal!.reason), { once: true });
         });
     });
@@ -232,7 +233,7 @@ test("cancellation during a pre-tool hook prevents tool execution", async (t) =>
         role: "assistant", usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 },
         content: [{ type: "toolCall", id: "cancel-in-hook", name: "read_file", arguments: { filePath: "unused" } }],
     }));
-    const tool = t.mock.method(TOOL_HANDLERS, "read_file", async () => "Unexpected execution.");
+    const tool = t.mock.method(TOOL_HANDLERS, "read_file", async () => ({ output: "Unexpected execution.", status: "completed" }));
 
     assert.deepEqual(await agentLoop({ messages, loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } }, controller.signal), { stop_reason: "cancelled" });
     assert.equal(tool.mock.callCount(), 0);
@@ -254,7 +255,7 @@ test("ordinary tool errors remain tool results and a headless run has no stdout"
     assert.deepEqual(messages[2], { role: "tool", toolCallId: "failure", toolName: "read_file", content: [{ type: "text", text: "Error: Read failed." }] });
 });
 
-test("output and trace share the status of invalid, denied, and failed tool calls", async (t) => {
+test("trace records requested tool arguments and shares tool status with output", async (t) => {
     const events: TraceEvent[] = [];
     const output: AgentOutputEvent[] = [];
     const state = { messages: history(), loopCount: 0, readFileHashes: new Map(), usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0 } };
@@ -271,13 +272,17 @@ test("output and trace share the status of invalid, denied, and failed tool call
     }), undefined, event => events.push(event), event => output.push(event));
 
     assert.equal(result.stop_reason, "completed");
+    assert.deepEqual(events.flatMap(event => event.type === "tool.started" ? [[event.tool_call_id, event.arguments]] : []), [
+        ["invalid_json", "{"], ["invalid_schema", {}], ["denied", { filePath: "unused" }],
+        ["failure", { filePath: `${import.meta.filename}/missing` }],
+    ]);
     assert.deepEqual(events.flatMap(event => event.type === "tool.finished" ? [[event.tool_call_id, event.status]] : []), [
         ["invalid_json", "invalid_arguments"], ["invalid_schema", "invalid_arguments"], ["denied", "denied"], ["failure", "error"],
     ]);
     assert.deepEqual(output, ["invalid_arguments", "invalid_arguments", "denied", "error"].map(status => ({
         type: "tool.finished", tool_name: "read_file", status,
     })));
-    assert.doesNotMatch(JSON.stringify(events), /private permission detail|missing|ENOTDIR/);
+    assert.doesNotMatch(JSON.stringify(events), /private permission detail|ENOTDIR/);
 });
 
 test("an unexpected tool lifecycle error closes its trace and still rejects the run", async (t) => {
@@ -321,8 +326,8 @@ for (const api of ["openai-responses", "anthropic-messages"] as const) {
         });
 
         const pending = LLM_ADAPTERS[api]({
-            model: { api, model: "test-model" }, messages: history(), signal: controller.signal,
-        });
+            model: { api, model: "test-model" }, messages: history(),
+        }, { signal: controller.signal });
         const rejected = assert.rejects(pending);
         const requestSignal = await started.promise;
         controller.abort();
@@ -358,7 +363,9 @@ for (const api of ["openai-responses", "anthropic-messages"] as const) {
         });
 
         const pending = LLM_ADAPTERS[api]({
-            model: { api, model: "test-model" }, messages: history(), signal: controller.signal,
+            model: { api, model: "test-model" }, messages: history(),
+        }, {
+            signal: controller.signal,
             onText(event) {
                 if (event.type === "text.delta" && event.text === partial) streamed.resolve();
             },
@@ -369,15 +376,17 @@ for (const api of ["openai-responses", "anthropic-messages"] as const) {
         await rejected;
     });
 
-    test(`${api} sends text fragments once and keeps the complete model message`, async (t) => {
+    test(`${api} sends thinking and reply fragments once and keeps the complete model message`, async (t) => {
         useTestKey(t, api);
         const stdout = t.mock.method(process.stdout, "write");
         const output: ModelTextEvent[] = [];
         const parts = ["First part. ", "Second part."];
         const text = parts.join("");
-        const thinking = "Private thinking.";
+        const thinkingParts = ["Private ", "thinking."];
+        const thinking = thinkingParts.join("");
         const events = api === "openai-responses" ? [
-            { type: "response.reasoning_text.delta", delta: thinking },
+            ...thinkingParts.map(delta => ({ type: "response.reasoning_text.delta", delta })),
+            { type: "response.reasoning_text.done", text: thinking },
             ...parts.map(delta => ({ type: "response.output_text.delta", delta })),
             { type: "response.output_text.done", text },
             { type: "response.completed", response: { output: [
@@ -386,12 +395,15 @@ for (const api of ["openai-responses", "anthropic-messages"] as const) {
             ] } },
         ] : [
             { type: "message_start", message: { id: "test", type: "message", role: "assistant", content: [], model: "test-model", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
-            { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
-            { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking } },
+            { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: thinkingParts[0], signature: "" } },
+            { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: thinkingParts[1] } },
+            { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "test-signature" } },
             { type: "content_block_stop", index: 0 },
             { type: "content_block_start", index: 1, content_block: { type: "text", text: "" } },
             ...parts.map(text => ({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text } })),
             { type: "content_block_stop", index: 1 },
+            { type: "content_block_start", index: 2, content_block: { type: "redacted_thinking", data: "test-opaque-data" } },
+            { type: "content_block_stop", index: 2 },
             { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } },
             { type: "message_stop" },
         ];
@@ -399,12 +411,25 @@ for (const api of ["openai-responses", "anthropic-messages"] as const) {
         t.mock.method(globalThis, "fetch", async () => new Response(body, { headers: { "content-type": "text/event-stream" } }));
         const request: LlmRequest = { model: { api, model: "test-model" }, messages: history() };
 
-        const message = await LLM_ADAPTERS[api]({ ...request, onText: event => output.push(event) });
+        const message = await LLM_ADAPTERS[api](request, { onText: event => output.push(event) });
         assert.deepEqual(await LLM_ADAPTERS[api](request), message);
 
         assert.equal(stdout.mock.callCount(), 0);
-        assert.deepEqual(output, [{ type: "text.delta", text: parts[0] }, { type: "text.delta", text: parts[1] }, { type: "text.end" }]);
+        assert.deepEqual(output, [
+            { type: "thinking.delta", text: thinkingParts[0] },
+            { type: "thinking.delta", text: thinkingParts[1] },
+            { type: "thinking.end" },
+            { type: "text.delta", text: parts[0] },
+            { type: "text.delta", text: parts[1] },
+            { type: "text.end" },
+        ]);
         assert.deepEqual(message.content[1], { type: "text", text });
-        assert.equal(message.content[0]?.type === "thinking" && message.content[0].thinking, thinking);
+        const thinkingBlock = message.content[0];
+        assert.ok(thinkingBlock?.type === "thinking");
+        assert.equal(thinkingBlock.thinking, thinking);
+        if (api === "anthropic-messages") {
+            assert.equal(thinkingBlock.thinkingSignature, "test-signature");
+            assert.deepEqual(message.content[2], { type: "redactedThinking", data: "test-opaque-data" });
+        }
     });
 }

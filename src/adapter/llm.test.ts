@@ -9,6 +9,8 @@ import {
     messageToAnthropicMessages,
     messageToResponseInput,
     responseOutputToMessage,
+    type LlmCallOptions,
+    type LlmRequest,
 } from "./llm.ts";
 
 const openAIUsage: Responses.ResponseUsage = {
@@ -263,12 +265,18 @@ test("the message converter leaves tool field checks to the tool handler", () =>
     }]);
 });
 
-test("createLlmStream routes a fake model and returns its canonical assistant Message", async () => {
+test("createLlmStream forwards the request and options to the selected adapter", async () => {
     const calls: string[] = [];
+    const request: LlmRequest = {
+        model: { api: "openai-responses", model: "fake-model" },
+        messages: [userMessage],
+    };
+    const options: LlmCallOptions = { signal: new AbortController().signal, onText: () => {} };
     const llmStream = createLlmStream({
-        "openai-responses": async (request) => {
+        "openai-responses": async (receivedRequest, receivedOptions) => {
             calls.push("openai-responses");
-            assert.deepEqual(request.messages, [userMessage]);
+            assert.equal(receivedRequest, request);
+            assert.equal(receivedOptions, options);
             return responseOutputToMessage(providerOutput);
         },
         "anthropic-messages": async () => {
@@ -277,10 +285,7 @@ test("createLlmStream routes a fake model and returns its canonical assistant Me
         },
     });
 
-    const reply = await llmStream({
-        model: { api: "openai-responses", model: "fake-model" },
-        messages: [userMessage],
-    });
+    const reply = await llmStream(request, options);
 
     assert.deepEqual(calls, ["openai-responses"]);
     assert.deepEqual(reply, responseOutputToMessage(providerOutput));

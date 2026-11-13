@@ -14,8 +14,8 @@ Shrimp gives the model four tools. The model requests a tool call. The agent run
 1. The model adapter parses the arguments and checks that they form a JSON object. If this check fails, the agent records the error as the result. It does not run hooks or permission checks for that call.
 2. The agent processes calls in their order in the model response. For a call with object arguments, it runs the `PreToolUse` hook. It checks permission on the resulting call.
 3. If a rule returns `ask`, the approval flow waits for the user's decision. It returns `allow` or `deny` to the agent.
-4. If permission is `allow` and the turn is active, `runTool` selects a handler from `TOOL_HANDLERS`. The handler checks its arguments. If they are invalid, it returns an error. If permission is `deny`, the agent skips execution and uses the denial message as the result.
-5. If the turn is active, the `PostToolUse` hook can change the result. The agent records the result with the tool call ID. The next model request includes the results in its message history.
+4. If permission is `allow` and the turn is active, `runTool` selects a handler from `TOOL_HANDLERS`. The handler checks its arguments and returns `{ output, status }`. If permission is `deny`, the agent skips execution and uses the denial message as the result.
+5. If the turn is active, the `PostToolUse` hook can change the output text. The agent sends the status to trace and CLI output when enabled. It records the output text with the tool call ID for the next model request.
 
 The [permission rules](bash-permission-gate.md) check Bash commands and paths for `write_file` and `edit_file`. The CLI supplies its working directory as the workspace when it starts the session. The file rule resolves relative paths against that workspace and requests approval for paths outside it.
 

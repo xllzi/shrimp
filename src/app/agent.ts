@@ -3,7 +3,7 @@ import type { AssistantMessage, InvalidToolCall, State, ToolCall, ToolResultMess
 import { applyModelResponse, applyPostToolUse, applyPreToolUse, applyStop } from "./hooks.ts";
 import { TOOL_DEFINITIONS } from "../domain/tools.ts";
 import type { PermissionCheck } from "./permission.ts";
-import { runTool, type ToolCallStatus, type ToolFailure } from "./tools.ts";
+import { runTool, type ToolCallStatus } from "./tools.ts";
 import { createRunTrace, type EmitTrace, type RunStopReason, type TraceSink } from "./trace.ts";
 
 const MODEL: ModelConfig = {
@@ -23,7 +23,7 @@ type AgentOutputSink = (event: AgentOutputEvent) => void;
  * Run the model and its tool calls until a response has no tool calls.
  * Append each response and tool result to `messages` in place.
  * Return a separate result for a model error or a user cancellation.
- * If the caller supplies `onOutput`, send reply text and tool status to it.
+ * If the caller supplies `onOutput`, send reply text, thinking text, and tool status to it.
  */
 export async function agentLoop(
     state: State,
@@ -71,9 +71,7 @@ async function runAgentLoop(
                     systemPrompt: "You are a thinking machine.",
                     messages,
                     tools: TOOL_DEFINITIONS,
-                    signal,
-                    onText: onOutput,
-                });
+                }, { signal, onText: onOutput });
             } finally {
                 trace?.({
                     type: "model.finished",
@@ -110,6 +108,12 @@ async function runAgentLoop(
     }
 }
 
+/**
+ * If the turn is active and the call has object arguments, run the pre-tool hook and check permission.
+ * Run the tool if permission allows it. Apply the post-tool hook if the turn is still active.
+ * Send the final status to trace and CLI output when enabled.
+ * Return a tool result message for the model.
+ */
 async function executeToolCall(
     call: ToolCall | InvalidToolCall,
     state: State,
@@ -120,7 +124,11 @@ async function executeToolCall(
     onOutput?: AgentOutputSink,
 ): Promise<ToolResultMessage> {
     const traceFields = { round, tool_call_id: call.id, tool_name: call.name };
-    trace?.({ type: "tool.started", ...traceFields });
+    trace?.({
+        type: "tool.started",
+        ...traceFields,
+        arguments: "argumentError" in call ? call.rawArguments : call.arguments,
+    });
     const startedAt = performance.now();
     let status: ToolCallStatus = "error";
     let output: string;
@@ -138,10 +146,9 @@ async function executeToolCall(
             const finding = await permissionCheck(call, signal);
             signal?.throwIfAborted();
             if (finding.permission === "allow") {
-                let failure: ToolFailure | undefined;
-                const reportFailure = trace || onOutput ? (outcome: ToolFailure) => { failure = outcome; } : undefined;
-                output = await runTool(call, state, signal, reportFailure);
-                status = failure ?? "completed";
+                const result = await runTool(call, state, signal);
+                output = result.output;
+                status = result.status;
             } else {
                 status = "denied";
                 output = finding.permission + ": " + finding.message;

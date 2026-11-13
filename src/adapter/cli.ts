@@ -18,21 +18,31 @@ export async function runCli(traceSink?: TraceSink): Promise<void> {
     };
 
     let needsLineBreak = false;
+    let showingThinking = false;
     // A stream can stop before it ends the current line.
     function finishText() {
         if (needsLineBreak) stdout.write("\n");
         needsLineBreak = false;
+        showingThinking = false;
     }
 
     function render(event: AgentOutputEvent) {
         switch (event.type) {
             case "text.delta":
-                if (event.text) {
-                    stdout.write(event.text);
-                    needsLineBreak = !event.text.endsWith("\n");
+            case "thinking.delta":
+                if (!event.text) break;
+                if (event.type === "thinking.delta" && !showingThinking) {
+                    finishText();
+                    stdout.write("Thinking...\n");
+                    showingThinking = true;
+                } else if (event.type === "text.delta" && showingThinking) {
+                    finishText();
                 }
+                stdout.write(event.text);
+                needsLineBreak = !event.text.endsWith("\n");
                 break;
             case "text.end":
+            case "thinking.end":
                 finishText();
                 break;
             case "tool.finished":

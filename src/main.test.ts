@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn, type SpawnOptions } from "node:child_process";
 import { once } from "node:events";
+import { closeSync, constants, openSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, watch, writeFile } from "node:fs/promises";
+import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import type { TraceEvent } from "./app/trace.ts";
 
 const transport = `
@@ -26,7 +29,8 @@ globalThis.fetch = async (_input, init) => {
         });
     }
     const tool = requests <= (phase === "trace" ? 1 : 2);
-    const commands = phase === "trace" ? "printf TRACE_TOOL_OUTPUT"
+    const textIndex = phase === "trace" ? 1 : 0;
+    const commands = phase === "trace" ? "printf TRACE_%s TOOL_OUTPUT"
         : phase === "permission" ? "bash -c 'sleep 60'"
         : "sleep 60 & printf ready > '" + process.env.TEST_TOOL_DIRECTORY + "/ready-" + requests + "'; wait";
     const events = tool ? [
@@ -38,10 +42,17 @@ globalThis.fetch = async (_input, init) => {
         { type: "message_stop" },
     ] : [
         { type: "message_start", message: { id: "test", type: "message", role: "assistant", content: [], model: "test", stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } },
-        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "TEST_" } },
-        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "COMPLETE" } },
-        { type: "content_block_stop", index: 0 },
+        ...(phase === "trace" ? [
+            { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
+            { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "TRACE_" } },
+            { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "THINKING_TEXT" } },
+            { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "TRACE_THINKING_SIGNATURE" } },
+            { type: "content_block_stop", index: 0 },
+        ] : []),
+        { type: "content_block_start", index: textIndex, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: "TEST_" } },
+        { type: "content_block_delta", index: textIndex, delta: { type: "text_delta", text: "COMPLETE" } },
+        { type: "content_block_stop", index: textIndex },
         { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } },
         { type: "message_stop" },
     ];
@@ -50,6 +61,50 @@ globalThis.fetch = async (_input, init) => {
 };
 `;
 
+async function startCli(
+    t: TestContext,
+    directory: string,
+    command: string,
+    args: string[],
+    options: Pick<SpawnOptions, "env" | "detached">,
+) {
+    // Node uses Unix sockets for stdio: "pipe". FIFOs also work when socket I/O is restricted.
+    const names = ["stdin", "stdout", "stderr"].map(name => path.join(directory, name));
+    await promisify(execFile)("mkfifo", names);
+    const childFds: number[] = [];
+    const parentFds: number[] = [];
+    try {
+        for (const [index, name] of names.entries()) {
+            // Open the read end first so the write end can open without waiting.
+            const read = openSync(name, constants.O_RDONLY | constants.O_NONBLOCK);
+            const readEnds = index === 0 ? childFds : parentFds;
+            const writeEnds = index === 0 ? parentFds : childFds;
+            readEnds.push(read);
+            writeEnds.push(openSync(name, constants.O_WRONLY | constants.O_NONBLOCK));
+        }
+        const stdin = new Socket({ fd: parentFds.shift()!, readable: false, writable: true });
+        const stdout = new Socket({ fd: parentFds.shift()!, readable: true, writable: false });
+        const stderr = new Socket({ fd: parentFds.shift()!, readable: true, writable: false });
+        const child = spawn(command, args, { ...options, cwd: directory, stdio: childFds });
+        const closed = once(child, "close");
+        t.after(async () => {
+            try {
+                if (child.pid && child.exitCode === null && child.signalCode === null) {
+                    process.kill(options.detached ? -child.pid : child.pid, "SIGKILL");
+                }
+                await closed;
+            } finally {
+                stdin.destroy();
+                stdout.destroy();
+                stderr.destroy();
+            }
+        });
+        return { child, stdin, stdout, stderr, closed };
+    } finally {
+        for (const fd of [...childFds, ...parentFds]) closeSync(fd);
+    }
+}
+
 for (const launcher of ["node", "npm"] as const) {
   for (const phase of ["request", "tool", "permission"] as const) {
     test(`${launcher} keeps the input prompt after ${phase} cancellation and a late SIGINT`, {
@@ -57,6 +112,7 @@ for (const launcher of ["node", "npm"] as const) {
         timeout: 5000,
     }, async (t) => {
         const directory = await mkdtemp(path.join(tmpdir(), "shrimp-cancel-"));
+        t.after(() => rm(directory, { recursive: true, force: true }));
         const preload = path.join(directory, "transport.mjs");
         const main = fileURLToPath(new URL("./main.ts", import.meta.url));
         await writeFile(preload, transport);
@@ -64,10 +120,10 @@ for (const launcher of ["node", "npm"] as const) {
         await writeFile(path.join(directory, "package.json"), JSON.stringify({
             scripts: { dev: `node --env-file=.env '${main.replaceAll("'", "'\\''")}'` },
         }));
-        const child = spawn(launcher === "node" ? process.execPath : "npm", launcher === "node" ? [main] : ["run", "dev"], {
-            cwd: directory,
+        const command = launcher === "node" ? process.execPath : "npm";
+        const args = launcher === "node" ? [main] : ["run", "dev"];
+        const { child, stdin, stdout, stderr, closed } = await startCli(t, directory, command, args, {
             detached: true,
-            stdio: "pipe",
             env: {
                 ...process.env,
                 ANTHROPIC_API_KEY: "local-test-key",
@@ -78,23 +134,15 @@ for (const launcher of ["node", "npm"] as const) {
                 npm_config_cache: path.join(directory, "npm-cache"),
             },
         });
-        t.after(async () => {
-            if (child.exitCode === null && child.signalCode === null) {
-                const exit = once(child, "exit");
-                process.kill(-child.pid!, "SIGKILL");
-                await exit;
-            }
-            await rm(directory, { recursive: true, force: true });
-        });
         let output = "";
         let transcript = "";
-        child.stdout.on("data", chunk => { output += chunk.toString(); transcript += chunk.toString(); });
-        child.stderr.on("data", chunk => { output += chunk.toString(); transcript += chunk.toString(); });
+        stdout.on("data", chunk => { output += chunk.toString(); transcript += chunk.toString(); });
+        stderr.on("data", chunk => { output += chunk.toString(); transcript += chunk.toString(); });
         function expect(marker: string): Promise<void> {
             return new Promise((resolve, reject) => {
                 const cleanup = () => {
-                    child.stdout.off("data", check);
-                    child.stderr.off("data", check);
+                    stdout.off("data", check);
+                    stderr.off("data", check);
                     child.off("exit", onExit);
                 };
                 const onExit = () => {
@@ -108,8 +156,8 @@ for (const launcher of ["node", "npm"] as const) {
                     cleanup();
                     resolve();
                 };
-                child.stdout.on("data", check);
-                child.stderr.on("data", check);
+                stdout.on("data", check);
+                stderr.on("data", check);
                 child.once("exit", onExit);
                 check();
                 if (child.exitCode !== null || child.signalCode !== null) onExit();
@@ -128,7 +176,7 @@ for (const launcher of ["node", "npm"] as const) {
 
         await expect("> ");
         const firstActive = expectActive(1);
-        child.stdin.write("first\n");
+        stdin.write("first\n");
         await firstActive;
         process.kill(-child.pid!, "SIGINT");
         await expect("Cancelled.");
@@ -136,18 +184,17 @@ for (const launcher of ["node", "npm"] as const) {
 
         process.kill(-child.pid!, "SIGINT");
         const secondActive = expectActive(2);
-        child.stdin.write("second\n");
+        stdin.write("second\n");
         await secondActive;
         process.kill(-child.pid!, "SIGINT");
         await expect("Cancelled.");
         await expect("> ");
 
-        child.stdin.write("third\n");
+        stdin.write("third\n");
         await expect("TEST_COMPLETE");
         await expect("> ");
-        const exit = once(child, "exit");
-        child.stdin.write(":q\n");
-        assert.deepEqual(await exit, [0, null]);
+        stdin.end(":q\n");
+        assert.deepEqual(await closed, [0, null]);
     });
   }
 }
@@ -162,9 +209,8 @@ for (const mode of ["enabled", "disabled", "blocked"] as const) {
         await writeFile(preload, transport);
         if (mode === "blocked") await writeFile(artifacts, "A file blocks directory creation.");
 
-        const child = spawn(process.execPath, [fileURLToPath(new URL("./main.ts", import.meta.url))], {
-            cwd: directory,
-            stdio: "pipe",
+        const main = fileURLToPath(new URL("./main.ts", import.meta.url));
+        const { stdin, stdout, stderr: stderrStream, closed } = await startCli(t, directory, process.execPath, [main], {
             env: {
                 ...process.env,
                 ANTHROPIC_API_KEY: "local-test-key",
@@ -173,20 +219,16 @@ for (const mode of ["enabled", "disabled", "blocked"] as const) {
                 NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
             },
         });
-        const closed = once(child, "close");
-        t.after(async () => {
-            if (child.exitCode === null && child.signalCode === null) child.kill();
-            await closed;
-        });
         let stderr = "";
-        child.stderr.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
-        const stdout = child.stdout.setEncoding("utf8")[Symbol.asyncIterator]();
+        stderrStream.setEncoding("utf8").on("data", chunk => { stderr += chunk; });
+        const stderrEnded = once(stderrStream, "end");
+        const chunks = stdout.setEncoding("utf8")[Symbol.asyncIterator]();
         let output = "";
         let transcript = "";
         async function expect(marker: string) {
             let index = output.indexOf(marker);
             while (index === -1) {
-                const chunk = await stdout.next();
+                const chunk = await chunks.next();
                 assert.equal(chunk.done, false, `CLI exited while waiting for ${marker}. ${stderr}`);
                 output += chunk.value;
                 transcript += chunk.value;
@@ -196,16 +238,22 @@ for (const mode of ["enabled", "disabled", "blocked"] as const) {
         }
 
         await expect("> ");
-        child.stdin.write("TRACE_PRIVATE_PROMPT\n");
+        stdin.write("TRACE_PRIVATE_PROMPT\n");
         await expect("bash: completed\n");
         await expect("TEST_COMPLETE");
         await expect("> ");
-        child.stdin.write("second prompt\n");
+        stdin.write("second prompt\n");
         await expect("TEST_COMPLETE");
         await expect("> ");
-        child.stdin.end(":q\n");
+        stdin.end(":q\n");
+        // The child close event does not wait for the parent to read the FIFOs.
+        for (let chunk = await chunks.next(); !chunk.done; chunk = await chunks.next()) {
+            transcript += chunk.value;
+        }
+        await stderrEnded;
         assert.deepEqual(await closed, [0, null]);
-        assert.equal(transcript, "> bash: completed\nTEST_COMPLETE\n> TEST_COMPLETE\n> ");
+        const streamedResponse = "Thinking...\nTRACE_THINKING_TEXT\nTEST_COMPLETE\n";
+        assert.equal(transcript, `> bash: completed\n${streamedResponse}> ${streamedResponse}> `);
 
         const warnings = stderr.match(/Shrimp could not write trace events/g) ?? [];
         assert.equal(warnings.length, mode === "blocked" ? 1 : 0);
@@ -218,7 +266,7 @@ for (const mode of ["enabled", "disabled", "blocked"] as const) {
         assert.equal(files.length, 2);
         const attempts = await Promise.all(files.map(async filename => {
             const raw = await readFile(path.join(traces, filename), "utf8");
-            assert.doesNotMatch(raw, /TRACE_PRIVATE_PROMPT|TRACE_TOOL_OUTPUT|TEST_COMPLETE/);
+            assert.doesNotMatch(raw, /TRACE_PRIVATE_PROMPT|TRACE_TOOL_OUTPUT|TRACE_THINKING_|TEST_COMPLETE/);
             const events: TraceEvent[] = raw.trimEnd().split("\n").map(line => JSON.parse(line));
             for (const [index, event] of events.entries()) {
                 assert.equal(`${event.attempt_id}.jsonl`, filename);
@@ -237,6 +285,9 @@ for (const mode of ["enabled", "disabled", "blocked"] as const) {
         assert.deepEqual(first.flatMap(event => event.type === "model.finished" ? [[event.round, event.status, event.usage]] : []), [
             [1, "completed", { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0 }],
             [2, "completed", { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0 }],
+        ]);
+        assert.deepEqual(first.flatMap(event => event.type === "tool.started" ? [[event.round, event.tool_call_id, event.tool_name, event.arguments]] : []), [
+            [1, "tool-1", "bash", { commands: "printf TRACE_%s TOOL_OUTPUT" }],
         ]);
         assert.deepEqual(first.flatMap(event => event.type === "tool.finished" ? [[event.round, event.tool_call_id, event.tool_name, event.status]] : []), [
             [1, "tool-1", "bash", "completed"],

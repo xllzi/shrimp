@@ -8,14 +8,15 @@
 | --- | --- |
 | `ModelConfig` | Selects `openai-responses` or `anthropic-messages`, names the model, and optionally sets `maxOutputTokens`. |
 | `Message` | Represents a user message, an assistant message, or a tool result in the agent history. |
-| `LlmRequest` | Carries the model, history, and optional system prompt, tool definitions, cancellation signal, and text callback. |
-| `LlmAdapter` | Takes one `LlmRequest` and returns one `AssistantMessage`. |
+| `LlmRequest` | Carries the model, history, and optional system prompt and tool definitions. |
+| `LlmCallOptions` | Carries an optional cancellation signal and text callback for this call. |
+| `LlmAdapter` | Takes a `LlmRequest` and optional `LlmCallOptions`. Returns one `AssistantMessage`. |
 
 An assistant message can contain text, a refusal, thinking, redacted thinking, and tool calls. A tool call stores its ID, name, and object arguments. A tool result refers to that ID through `toolCallId`.
 
 `createLlmStream` selects an adapter through `request.model.api`. The default `llmStream` uses `LLM_ADAPTERS` and returns a complete assistant message.
 
-Both adapters can send text fragments to a callback while they read the stream. See [Streaming output](streaming-output.md) for the event mapping and terminal rendering.
+Call `llmStream(request, { signal, onText })` to pass a cancellation signal or receive reply and thinking fragments. The second argument is optional. See [Streaming output](streaming-output.md) for the event mapping and terminal rendering.
 
 ## Request path
 
